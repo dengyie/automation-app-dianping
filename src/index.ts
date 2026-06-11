@@ -9,6 +9,7 @@ const HELP = `
 
 命令:
   login               打开浏览器登录，保存会话
+  check               检查环境配置（浏览器/session/python/slidex）
   discover            从收藏夹/浏览历史发现店铺，追加到 data/shops.txt
   scrape <店铺URL> [店名]  抓取店铺信息（推荐菜、评分、评价）
   generate <店铺URL> [店名] AI 生成评价草稿（需先 scrape）
@@ -50,6 +51,11 @@ async function main() {
     case 'login': {
       const { loginCommand } = await import('./cli/login.js');
       await loginCommand();
+      break;
+    }
+    case 'check': {
+      const { checkCommand } = await import('./cli/check.js');
+      await checkCommand();
       break;
     }
     case 'discover': {

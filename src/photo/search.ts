@@ -18,8 +18,10 @@ export async function webSearchPhotos(
 
   try {
     // Navigate to Baidu Images
-    const searchUrl = `https://image.baidu.com/search/index?tn=baiduimage&word=${encodeURIComponent(query + ' 美食')}`;
-    info(`搜索图片: ${query} 美食`);
+    // Build a specific search query using shop name + dish name
+    const queryParts = [query, '美食'].filter(Boolean);
+    const searchUrl = `https://image.baidu.com/search/index?tn=baiduimage&word=${encodeURIComponent(queryParts.join(' '))}`;
+    info(`搜索图片: ${queryParts.join(' ')}`);
     await page.goto(searchUrl, { timeout: 15000, waitUntil: 'domcontentloaded' });
     await sleep(2000);
 
@@ -57,7 +59,8 @@ export async function webSearchPhotos(
         if (!resp.ok || !resp.headers.get('content-type')?.startsWith('image/')) continue;
 
         const buffer = Buffer.from(await resp.arrayBuffer());
-        if (buffer.length < 5000) continue; // skip tiny images
+        if (buffer.length < 10_000) continue; // skip tiny images/thumbnails
+        if (buffer.length > 5_000_000) continue; // skip overly large images
 
         const ext = resp.headers.get('content-type')?.split('/')[1] || 'jpg';
         const filename = `${Date.now()}-${results.length}.${ext}`;

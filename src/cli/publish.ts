@@ -246,11 +246,21 @@ async function setRatings(page: any, taste: number, environment: number, service
 
 async function uploadPhotos(page: any, photos: string[]) {
   try {
-    const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 5000 });
-    const uploadBtn = await findElement(page, SELECTORS.PHOTO_UPLOAD, 3000)
-      || await findElement(page, ['input[type="file"]'], 2000);
+    // Try direct input[type="file"] first (no dialog needed)
+    const fileInput = page.locator('input[type="file"]').first();
+    try {
+      await fileInput.waitFor({ state: 'attached', timeout: 3000 });
+      await fileInput.setInputFiles(photos);
+      info(`已上传 ${photos.length} 张图片`);
+      return;
+    } catch { /* no direct file input, try button approach */ }
+
+    // Button approach: find button, then listen for filechooser, then click
+    const uploadBtn = await findElement(page, SELECTORS.PHOTO_UPLOAD, 3000);
     if (!uploadBtn) { warn('找不到图片上传入口'); return; }
-    await uploadBtn.click({ timeout: 3000 });
+
+    const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 5000 });
+    await uploadBtn.click();
     const fileChooser = await fileChooserPromise;
     await fileChooser.setFiles(photos);
     info(`已上传 ${photos.length} 张图片`);
