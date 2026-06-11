@@ -87,9 +87,16 @@ export async function publishCommand(draftId: string) {
       return;
     }
 
-    // Navigate to shop
-    await page.goto(draft.shopUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await sleep(2000);
+    // Navigate to shop — wait for JS to render
+    await page.goto(draft.shopUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await sleep(rand(3000, 5000));
+
+    // Wait for shop content to appear
+    try {
+      await page.waitForSelector('h1, [class*="shop-name"], [class*="ShopName"]', { timeout: 10000 });
+    } catch {
+      warn('店铺页面内容可能未完全加载，继续尝试...');
+    }
 
     // Browse naturally
     const humanizeConfig = {
