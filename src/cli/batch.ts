@@ -1,9 +1,8 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../storage/config.js';
-import { loadState, canPublishToday, minutesSinceLastPublish, saveState } from '../storage/state.js';
-import { loadDraftByUrl, saveDraft, createDraft, listDrafts, type DraftFile } from '../storage/drafts.js';
-import { addEntry } from '../storage/history.js';
+import { loadState, canPublishToday, minutesSinceLastPublish } from '../storage/state.js';
+import { loadDraftByUrl, listDrafts } from '../storage/drafts.js';
 import { scrapeCommand } from './scrape.js';
 import { generateCommand } from './generate.js';
 import { publishCommand } from './publish.js';
@@ -96,7 +95,6 @@ export async function batchCommand(args: string[]) {
   }
 
   // Phase 2: Publish drafts respecting limits
-  const state = await loadState();
   const drafts = (await listDrafts()).filter(d => d.draft.status === 'edited');
 
   if (drafts.length === 0) {
@@ -108,6 +106,9 @@ export async function batchCommand(args: string[]) {
   let published = 0;
 
   for (const draft of drafts) {
+    // Reload state from disk each iteration (publishCommand updates it)
+    const state = await loadState();
+
     // Check daily limit
     if (!(await canPublishToday(state, config.publishing.maxPerDay))) {
       warn(`今日额度已满 (${state.todayPublishedCount}/${config.publishing.maxPerDay})，剩余草稿明天再发布。`);
@@ -125,13 +126,7 @@ export async function batchCommand(args: string[]) {
     info(`发布: ${draft.shopName} (${draft.id})`);
     try {
       await publishCommand(draft.id);
-      // Reload state after publish (it may have been updated)
-      const newState = await loadState();
-      if (newState.todayPublishedCount > state.todayPublishedCount) {
-        published++;
-        state.todayPublishedCount = newState.todayPublishedCount;
-        state.lastPublishedTimestamp = newState.lastPublishedTimestamp;
-      }
+      published++;
     } catch (err) {
       error(`发布失败: ${err}`);
     }
@@ -139,9 +134,10 @@ export async function batchCommand(args: string[]) {
     await sleep(5000);
   }
 
+  const finalState = await loadState();
   divider();
   success(`批量完成: ${generated} 生成, ${published} 发布`);
   if (published > 0) {
-    console.log(`  今日进度: ${state.todayPublishedCount}/${config.publishing.maxPerDay}`);
+    console.log(`  今日进度: ${finalState.todayPublishedCount}/${config.publishing.maxPerDay}`);
   }
 }

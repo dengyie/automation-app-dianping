@@ -223,20 +223,19 @@ async function setRatings(page: any, taste: number, environment: number, service
 
   for (const { label, value } of ratings) {
     try {
-      // Find the rating row by label text, then locate stars within it
+      // Find the rating row by label text
       const row = await findElement(page, label, 3000);
       if (!row) { warn(`找不到评分行: ${label[0]}`); continue; }
 
-      // Stars are usually siblings or children: img, span, or li elements
-      const stars = row.locator('~ img, ~ span[class*="star"], ~ li, img, span[class*="star"], li');
-      const count = await stars.count();
-      if (count >= value) {
-        const target = stars.nth(value - 1);
+      // Find star-like elements within this row's scope
+      const stars = await row.$$('img, span[class*="star"], li, a');
+      if (stars.length >= value) {
+        const target = stars[value - 1];
         await target.scrollIntoViewIfNeeded();
         await sleep(rand(200, 500));
         await target.click();
       } else {
-        warn(`评分行星星数不足: ${count} < ${value}`);
+        warn(`评分行星星数不足: ${stars.length} < ${value}`);
       }
       await sleep(rand(500, 1500));
     } catch {
