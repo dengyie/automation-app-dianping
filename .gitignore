@@ -1,0 +1,9 @@
+node_modules/
+data/sessions/
+data/drafts/
+data/history.json
+data/state.json
+data/photos/_downloaded/
+.env
+*.tmp
+.bak

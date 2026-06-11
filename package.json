@@ -1,0 +1,15 @@
+{
+  "name": "dianping",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "login": "bun run src/index.ts login",
+    "scrape": "bun run src/index.ts scrape",
+    "generate": "bun run src/index.ts generate",
+    "publish": "bun run src/index.ts publish",
+    "status": "bun run src/index.ts status"
+  },
+  "dependencies": {
+    "@playwright/mcp": "^0.0.75"
+  }
+}
