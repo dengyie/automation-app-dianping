@@ -263,10 +263,9 @@ async function clickSubmit(page: any) {
   try {
     const submitBtn = await findElement(page, SELECTORS.SUBMIT_BUTTON, 5000);
     if (!submitBtn) { warn('找不到发布按钮'); return; }
-    const box = await submitBtn.boundingBox();
-    if (box) {
-      await clickNaturally(page, SELECTORS.SUBMIT_BUTTON[0]);
-    }
+    await submitBtn.scrollIntoViewIfNeeded();
+    await sleep(rand(200, 500));
+    await submitBtn.click();
     info('已点击发布按钮');
   } catch {
     warn('找不到发布按钮，请手动点击。');

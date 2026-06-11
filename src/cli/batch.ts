@@ -2,7 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../storage/config.js';
 import { loadState, canPublishToday, minutesSinceLastPublish } from '../storage/state.js';
-import { loadDraftByUrl, listDrafts } from '../storage/drafts.js';
+import { loadDraftByUrl, loadDraft, listDrafts } from '../storage/drafts.js';
 import { scrapeCommand } from './scrape.js';
 import { generateCommand } from './generate.js';
 import { publishCommand } from './publish.js';
@@ -126,7 +126,11 @@ export async function batchCommand(args: string[]) {
     info(`发布: ${draft.shopName} (${draft.id})`);
     try {
       await publishCommand(draft.id);
-      published++;
+      // Verify draft was actually published (publishCommand may return early on error)
+      const updated = await loadDraft(draft.id);
+      if (updated?.draft?.status === 'published') {
+        published++;
+      }
     } catch (err) {
       error(`发布失败: ${err}`);
     }
