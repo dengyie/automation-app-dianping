@@ -3,7 +3,9 @@ data/sessions/
 data/drafts/
 data/history.json
 data/state.json
+data/config.json
 data/photos/_downloaded/
+data/captcha_debug/
 .env
 *.tmp
-.bak
+*.bak
