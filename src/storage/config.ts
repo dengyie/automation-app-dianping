@@ -109,7 +109,14 @@ export async function loadConfig(): Promise<AppConfig> {
     return { ...DEFAULTS };
   }
   const raw = await readFile(CONFIG_PATH, 'utf-8');
-  const userConfig = JSON.parse(raw);
+  let userConfig: Record<string, any>;
+  try {
+    userConfig = JSON.parse(raw);
+  } catch (err: any) {
+    console.error(`配置文件 JSON 格式错误 (${CONFIG_PATH}): ${err.message}`);
+    console.error('使用默认配置。请检查 config.json 语法。');
+    return { ...DEFAULTS };
+  }
   return deepMerge(DEFAULTS, userConfig);
 }
 
@@ -121,10 +128,13 @@ export async function saveConfig(config: AppConfig): Promise<void> {
 function deepMerge<T extends Record<string, any>>(base: T, override: Partial<T>): T {
   const result = { ...base };
   for (const key of Object.keys(override) as (keyof T)[]) {
-    if (override[key] && typeof override[key] === 'object' && !Array.isArray(override[key])) {
-      (result as any)[key] = deepMerge(base[key], override[key] as any);
+    const baseVal = base[key];
+    const overVal = override[key];
+    if (overVal && typeof overVal === 'object' && !Array.isArray(overVal)
+        && baseVal && typeof baseVal === 'object' && !Array.isArray(baseVal)) {
+      (result as any)[key] = deepMerge(baseVal, overVal);
     } else {
-      (result as any)[key] = override[key];
+      (result as any)[key] = overVal;
     }
   }
   return result;

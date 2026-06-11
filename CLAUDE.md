@@ -9,6 +9,7 @@ src/
 ├── index.ts              # CLI 入口，命令路由
 ├── cli/
 │   ├── login.ts          # 扫码登录，保存 session
+│   ├── discover.ts       # 从收藏夹/浏览历史发现店铺
 │   ├── scrape.ts         # 3 层策略抓取店铺数据
 │   ├── generate.ts       # AI 生成评价 + 交互编辑
 │   ├── publish.ts        # 6 阶段模拟真人发布

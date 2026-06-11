@@ -9,6 +9,7 @@ const HELP = `
 
 命令:
   login               打开浏览器登录，保存会话
+  discover            从收藏夹/浏览历史发现店铺，追加到 data/shops.txt
   scrape <店铺URL> [店名]  抓取店铺信息（推荐菜、评分、评价）
   generate <店铺URL> [店名] AI 生成评价草稿（需先 scrape）
   publish <草稿ID>    模拟真人发布评价
@@ -49,6 +50,11 @@ async function main() {
     case 'login': {
       const { loginCommand } = await import('./cli/login.js');
       await loginCommand();
+      break;
+    }
+    case 'discover': {
+      const { discoverCommand } = await import('./cli/discover.js');
+      await discoverCommand();
       break;
     }
     case 'scrape': {

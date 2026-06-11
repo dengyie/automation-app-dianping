@@ -47,7 +47,7 @@ export interface SampleReview {
 
 export function slugFromUrl(url: string): string {
   const match = url.match(/\/shop\/([A-Za-z0-9]+)/);
-  return match ? match[1].slice(0, 10) : url.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 30);
+  return match ? match[1] : url.replace(/[^a-zA-Z0-9]/g, '-').slice(0, 30);
 }
 
 export function draftPath(id: string): string {
