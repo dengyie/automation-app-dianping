@@ -4,7 +4,7 @@ import { loadDraft, saveDraft, type DraftFile } from '../storage/drafts.js';
 import { addEntry } from '../storage/history.js';
 import { loadState, saveState, canPublishToday, minutesSinceLastPublish } from '../storage/state.js';
 import { browseNaturally, typeNaturally, clickNaturally } from '../browser/humanize.js';
-import { handleCaptchaIfNeeded } from '../browser/captcha.js';
+import { handleCaptchaIfNeeded, detectCaptcha, solveCaptcha } from '../browser/captcha.js';
 import { validateReview } from '../utils/validate.js';
 import { scanPhotos } from '../photo/local.js';
 import { webSearchPhotos } from '../photo/search.js';
@@ -94,7 +94,6 @@ export async function publishCommand(draftId: string) {
     const reviewBtnClicked = await clickReviewButton(page);
     if (!reviewBtnClicked) {
       error('找不到"写评价"按钮，可能需要手动操作。');
-      await browser.close();
       return;
     }
     await sleep(rand(2000, 4000));
@@ -102,7 +101,6 @@ export async function publishCommand(draftId: string) {
     // Phase 2.5: Handle captcha if triggered
     if (!await handleCaptchaIfNeeded(page, config)) {
       error('验证码无法解决，发布中止。');
-      await browser.close();
       return;
     }
     info('阶段3: 输入评价...');
@@ -115,7 +113,6 @@ export async function publishCommand(draftId: string) {
       info('评价输入完成');
     } catch {
       error('找不到输入框，检查页面是否正常加载。');
-      await browser.close();
       return;
     }
 
@@ -140,9 +137,16 @@ export async function publishCommand(draftId: string) {
     await sleep(rand(3000, 5000));
 
     // Phase 6.5: Handle captcha if triggered after submit
-    if (!await handleCaptchaIfNeeded(page, config)) {
-      warn('提交时遇到验证码，可能未发布成功。草稿已保留。');
-      return;
+    const hadCaptcha = await detectCaptcha(page);
+    if (hadCaptcha) {
+      if (!await solveCaptcha(page, config)) {
+        warn('提交时遇到验证码，可能未发布成功。草稿已保留。');
+        return;
+      }
+      // Captcha intercepted the submit — re-click and wait
+      await sleep(rand(1000, 2000));
+      await clickSubmit(page);
+      await sleep(rand(3000, 5000));
     }
 
     const pageContent = await page.content();

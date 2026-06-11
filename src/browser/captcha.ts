@@ -1,22 +1,27 @@
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import type { Page } from 'playwright';
 import { SELECTORS } from './selectors.js';
 import type { AppConfig } from '../storage/config.js';
 import { info, warn, error } from '../utils/logger.js';
-import { sleep } from '../utils/delay.js';
+import { sleep, rand } from '../utils/delay.js';
 
 export async function detectCaptcha(page: Page): Promise<boolean> {
   for (const sel of SELECTORS.CAPTCHA) {
     try {
       const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1000 })) return true;
+      if (await el.isVisible({ timeout: 500 })) return true;
     } catch { /* next selector */ }
   }
   return false;
 }
 
 export async function solveCaptcha(page: Page, config: AppConfig): Promise<boolean> {
-  const wsEndpoint = page.context()?.browser()?.wsEndpoint();
+  const browser = page.context().browser();
+  if (!browser) {
+    error('浏览器连接已断开，无法获取 CDP endpoint');
+    return false;
+  }
+  const wsEndpoint = browser.wsEndpoint();
   if (!wsEndpoint) {
     error('无法获取浏览器 CDP endpoint');
     return false;
@@ -26,33 +31,42 @@ export async function solveCaptcha(page: Page, config: AppConfig): Promise<boole
     info(`验证码求解第 ${attempt}/${config.captcha.maxRetries} 次尝试...`);
 
     try {
-      const selectorsJson = JSON.stringify(config.captcha.selectors);
-      const cmd = [
-        config.captcha.pythonPath, '-m', 'slidex.scripts.slide_solve_cdp',
+      const args = [
+        '-m', 'slidex.scripts.slide_solve_cdp',
         '--cdp-endpoint', wsEndpoint,
-        '--selectors', `'${selectorsJson}'`,
+        '--selectors', JSON.stringify(config.captcha.selectors),
         '--cookie-id', config.account.name || 'default',
-      ].join(' ');
+      ];
 
-      const stdout = execSync(cmd, {
+      const stdout = execFileSync(config.captcha.pythonPath, args, {
         encoding: 'utf-8',
         timeout: 60_000,
-        stdio: ['pipe', 'pipe', 'pipe'],
       }).trim();
 
-      const result = JSON.parse(stdout);
-      if (result.success) {
+      // Extract JSON from stdout (skip any non-JSON preamble from Python)
+      const jsonStart = stdout.indexOf('{');
+      const jsonEnd = stdout.lastIndexOf('}');
+      if (jsonStart === -1 || jsonEnd === -1) {
+        warn(`slidex 输出不含 JSON: ${stdout.slice(0, 200)}`);
+        continue;
+      }
+
+      const result = JSON.parse(stdout.slice(jsonStart, jsonEnd + 1));
+      if (result && result.success) {
         info(`验证码已解决 (${result.elapsed_ms}ms)`);
+        await sleep(rand(1500, 3000));
         return true;
       }
 
-      warn(`求解失败: ${result.error || 'unknown'}`);
+      warn(`求解失败: ${result?.error || 'unknown'}`);
     } catch (err: any) {
-      error(`slidex 调用失败: ${err.message?.slice(0, 200)}`);
+      const stderr = err.stderr?.toString()?.slice(0, 500) || '';
+      const msg = err.message?.slice(0, 200) || '';
+      error(`slidex 调用失败: ${msg}${stderr ? '\n' + stderr : ''}`);
     }
 
     if (attempt < config.captcha.maxRetries) {
-      await sleep(2000 + Math.random() * 1000);
+      await sleep(rand(2000, 3000));
     }
   }
 

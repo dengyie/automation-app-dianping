@@ -22,7 +22,7 @@ export const SELECTORS = {
   CAPTCHA: ['text=验证码', 'text=滑块验证', 'text=请完成验证', 'text=拖动滑块',
     '.geetest_panel', '.geetest_wind', '.geetest_widget',
     '.yidun_modal', '.yidun_panel',
-    '[class*="captcha"]'],
+    '.captcha-wrapper', '.captcha-modal', '.verify-wrap'],
 } as const;
 
 export async function findElement(page: any, selectors: readonly string[], timeout = 5000) {
