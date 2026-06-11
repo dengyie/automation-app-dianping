@@ -39,8 +39,8 @@ src/
 ## Pipeline
 
 ```
-login → scrape → generate → publish → status
-                  batch (批量: scrape+generate+publish)
+login → check → discover → scrape → generate → publish → status
+                               batch (批量: scrape+generate+publish)
 ```
 
 ## 关键设计决策
