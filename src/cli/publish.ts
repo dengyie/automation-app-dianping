@@ -88,12 +88,19 @@ export async function publishCommand(draftId: string) {
     }
 
     // Navigate to shop — wait for JS to render
+    info(`导航到: ${draft.shopUrl}`);
     await page.goto(draft.shopUrl, { waitUntil: 'networkidle', timeout: 30000 });
     await sleep(rand(3000, 5000));
 
-    // Wait for shop content to appear
+    // Handle captcha/verification redirect (verify.meituan.com)
+    if (!await handleCaptchaIfNeeded(page, config)) {
+      error('导航时遇到验证码且无法解决，发布中止。');
+      return;
+    }
+
+    // Wait for shop content
     try {
-      await page.waitForSelector('h1, [class*="shop-name"], [class*="ShopName"]', { timeout: 10000 });
+      await page.waitForSelector('h1, [class*="shop-name"]', { timeout: 10000 });
     } catch {
       warn('店铺页面内容可能未完全加载，继续尝试...');
     }
