@@ -12,6 +12,7 @@ src/
 │   ├── scrape.ts         # 3 层策略抓取店铺数据
 │   ├── generate.ts       # AI 生成评价 + 交互编辑
 │   ├── publish.ts        # 6 阶段模拟真人发布
+│   ├── batch.ts          # 批量抓取+生成+发布（data/shops.txt）
 │   └── status.ts         # 橙V 进度 + 草稿箱
 ├── browser/
 │   ├── launch.ts         # 浏览器启动 + 反检测
@@ -37,6 +38,7 @@ src/
 
 ```
 login → scrape → generate → publish → status
+                  batch (批量: scrape+generate+publish)
 ```
 
 ## 关键设计决策

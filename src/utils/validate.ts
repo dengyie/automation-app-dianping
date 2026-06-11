@@ -13,8 +13,9 @@ export function validateReview(draft: ReviewDraft): string | null {
   if (!draft.content || draft.content.trim().length === 0) {
     return '评价内容不能为空';
   }
-  if (draft.content.length < 100) {
-    return `评价内容不足100字（当前 ${draft.content.length} 字），不满足橙V要求`;
+  const chineseCount = countChineseChars(draft.content);
+  if (chineseCount < 100) {
+    return `中文字符不足100字（当前 ${chineseCount} 字），不满足橙V要求`;
   }
   const { taste, environment, service } = draft.ratings;
   for (const [key, val] of Object.entries({ taste, environment, service })) {

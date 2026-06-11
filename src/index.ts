@@ -12,6 +12,7 @@ const HELP = `
   scrape <店铺URL> [店名]  抓取店铺信息（推荐菜、评分、评价）
   generate <店铺URL> [店名] AI 生成评价草稿（需先 scrape）
   publish <草稿ID>    模拟真人发布评价
+  batch  [URL...]     批量抓取+生成+发布（从 data/shops.txt 或参数读取店铺列表）
   status              查看评价进度和橙V状态
 
 示例:
@@ -19,6 +20,8 @@ const HELP = `
   bun run src/index.ts scrape https://www.dianping.com/shop/xxx
   bun run src/index.ts generate https://www.dianping.com/shop/xxx
   bun run src/index.ts publish xxx-20260606
+  bun run src/index.ts batch
+  bun run src/index.ts batch https://www.dianping.com/shop/xxx 店名
   bun run src/index.ts status
 `;
 
@@ -78,6 +81,11 @@ async function main() {
     case 'status': {
       const { statusCommand } = await import('./cli/status.js');
       await statusCommand();
+      break;
+    }
+    case 'batch': {
+      const { batchCommand } = await import('./cli/batch.js');
+      await batchCommand(cmdArgs);
       break;
     }
     default:

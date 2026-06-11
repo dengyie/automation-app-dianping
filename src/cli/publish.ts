@@ -4,6 +4,8 @@ import { loadDraft, saveDraft, type DraftFile } from '../storage/drafts.js';
 import { addEntry } from '../storage/history.js';
 import { loadState, saveState, canPublishToday, minutesSinceLastPublish } from '../storage/state.js';
 import { browseNaturally, typeNaturally, clickNaturally } from '../browser/humanize.js';
+import { findElement } from '../browser/selectors.js';
+import { SELECTORS } from '../browser/selectors.js';
 import { handleCaptchaIfNeeded, detectCaptcha, solveCaptcha } from '../browser/captcha.js';
 import { validateReview } from '../utils/validate.js';
 import { scanPhotos } from '../photo/local.js';
@@ -78,6 +80,13 @@ export async function publishCommand(draftId: string) {
     await page.goto('https://www.dianping.com/', { waitUntil: 'domcontentloaded' });
     await sleep(rand(2000, 5000));
 
+    // Validate session is still alive
+    const loggedIn = await findElement(page, SELECTORS.LOGIN_INDICATOR, 3000);
+    if (!loggedIn) {
+      error('Session 已过期，请先运行 login 重新登录。');
+      return;
+    }
+
     // Navigate to shop
     await page.goto(draft.shopUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await sleep(2000);
@@ -104,7 +113,8 @@ export async function publishCommand(draftId: string) {
       return;
     }
     info('阶段3: 输入评价...');
-    const textarea = page.locator('textarea, [contenteditable="true"]').first();
+    const textarea = (await findElement(page, SELECTORS.REVIEW_TEXTAREA, 5000))
+      || page.locator('textarea, [contenteditable="true"]').first();
     try {
       await textarea.waitFor({ state: 'visible', timeout: 5000 });
       await textarea.click();
@@ -149,8 +159,9 @@ export async function publishCommand(draftId: string) {
       await sleep(rand(3000, 5000));
     }
 
-    const pageContent = await page.content();
-    const isSuccess = pageContent.includes('成功') || pageContent.includes('审核') || page.url().includes('review');
+    // Verify success via specific selectors, not raw HTML substring
+    const successEl = await findElement(page, SELECTORS.SUCCESS_INDICATOR, 5000);
+    const isSuccess = !!successEl || page.url().includes('review');
 
     if (isSuccess) {
       // Update records
@@ -204,39 +215,42 @@ async function clickReviewButton(page: any): Promise<boolean> {
 }
 
 async function setRatings(page: any, taste: number, environment: number, service: number) {
-  // Try to find star rows and click the appropriate star
-  try {
-    // Look for star elements - usually clickable spans with star icons
-    const starRows = page.locator('[class*="star"], li:has(img)');
-    const rows = await starRows.all();
+  const ratings = [
+    { label: SELECTORS.RATING_TASTE, value: taste },
+    { label: SELECTORS.RATING_ENVIRONMENT, value: environment },
+    { label: SELECTORS.RATING_SERVICE, value: service },
+  ];
 
-    if (rows.length >= 3) {
-      // Assume first 3 rows are 口味, 环境, 服务
-      await clickStarInRow(rows[0], taste);
+  for (const { label, value } of ratings) {
+    try {
+      // Find the rating row by label text, then locate stars within it
+      const row = await findElement(page, label, 3000);
+      if (!row) { warn(`找不到评分行: ${label[0]}`); continue; }
+
+      // Stars are usually siblings or children: img, span, or li elements
+      const stars = row.locator('~ img, ~ span[class*="star"], ~ li, img, span[class*="star"], li');
+      const count = await stars.count();
+      if (count >= value) {
+        const target = stars.nth(value - 1);
+        await target.scrollIntoViewIfNeeded();
+        await sleep(rand(200, 500));
+        await target.click();
+      } else {
+        warn(`评分行星星数不足: ${count} < ${value}`);
+      }
       await sleep(rand(500, 1500));
-      await clickStarInRow(rows[1], environment);
-      await sleep(rand(500, 1500));
-      await clickStarInRow(rows[2], service);
+    } catch {
+      warn(`评分设置失败: ${label[0]}`);
     }
-  } catch {
-    warn('自动评分可能失败，请手动调整。');
-  }
-}
-
-async function clickStarInRow(row: any, rating: number) {
-  const stars = row.locator('[class*="star"], img, span');
-  const count = await stars.count();
-  if (count >= rating) {
-    const targetStar = stars.nth(rating - 1);
-    await targetStar.scrollIntoViewIfNeeded();
-    await targetStar.click();
   }
 }
 
 async function uploadPhotos(page: any, photos: string[]) {
   try {
     const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 5000 });
-    const uploadBtn = page.locator('text=添加图片, text=上传图片, [class*="upload"], input[type="file"]').first();
+    const uploadBtn = await findElement(page, SELECTORS.PHOTO_UPLOAD, 3000)
+      || await findElement(page, ['input[type="file"]'], 2000);
+    if (!uploadBtn) { warn('找不到图片上传入口'); return; }
     await uploadBtn.click({ timeout: 3000 });
     const fileChooser = await fileChooserPromise;
     await fileChooser.setFiles(photos);
@@ -248,9 +262,12 @@ async function uploadPhotos(page: any, photos: string[]) {
 
 async function clickSubmit(page: any) {
   try {
-    const submitBtn = page.locator('button:has-text("发布"), button:has-text("提交"), text=发布评价').first();
-    await submitBtn.waitFor({ state: 'visible', timeout: 5000 });
-    await clickNaturally(page, 'button:has-text("发布")');
+    const submitBtn = await findElement(page, SELECTORS.SUBMIT_BUTTON, 5000);
+    if (!submitBtn) { warn('找不到发布按钮'); return; }
+    const box = await submitBtn.boundingBox();
+    if (box) {
+      await clickNaturally(page, SELECTORS.SUBMIT_BUTTON[0]);
+    }
     info('已点击发布按钮');
   } catch {
     warn('找不到发布按钮，请手动点击。');
