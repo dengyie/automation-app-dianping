@@ -92,6 +92,16 @@ export async function publishCommand(draftId: string) {
     await page.goto(draft.shopUrl, { waitUntil: 'networkidle', timeout: 30000 });
     await sleep(rand(3000, 5000));
 
+    // Debug: log actual URL and page state
+    const currentUrl = page.url();
+    const bodyLen = await page.evaluate(() => document.body?.innerHTML?.length || 0).catch(() => 0);
+    info(`当前URL: ${currentUrl.slice(0, 100)}`);
+    info(`页面内容长度: ${bodyLen} 字符`);
+
+    // Save debug screenshot
+    await page.screenshot({ path: 'data/captcha_debug/after_nav.png' });
+    info('截图已保存到 data/captcha_debug/after_nav.png');
+
     // Handle captcha/verification redirect (verify.meituan.com)
     if (!await handleCaptchaIfNeeded(page, config)) {
       error('导航时遇到验证码且无法解决，发布中止。');
