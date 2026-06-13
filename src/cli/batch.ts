@@ -1,11 +1,10 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../storage/config.js';
-import { loadState, canPublishToday, minutesSinceLastPublish } from '../storage/state.js';
-import { loadDraftByUrl, loadDraft, listDrafts } from '../storage/drafts.js';
+import { loadDraftByUrl, listDrafts } from '../storage/drafts.js';
 import { scrapeCommand } from './scrape.js';
 import { generateCommand } from './generate.js';
-import { publishCommand } from './publish.js';
+import { prepareCommand } from './prepare.js';
 import { info, success, warn, error, divider } from '../utils/logger.js';
 import { sleep } from '../utils/delay.js';
 
@@ -94,54 +93,14 @@ export async function batchCommand(args: string[]) {
     success(`生成了 ${generated} 条评价草稿`);
   }
 
-  // Phase 2: Publish drafts respecting limits
-  const drafts = (await listDrafts()).filter(d => d.draft.status === 'edited');
+  // Phase 2: Generate checklist
+  divider('生成发布清单');
+  await prepareCommand({});
 
-  if (drafts.length === 0) {
-    info('没有待发布的草稿。');
-    return;
-  }
-
-  divider(`发布草稿: ${drafts.length} 条待发布`);
-  let published = 0;
-
-  for (const draft of drafts) {
-    // Reload state from disk each iteration (publishCommand updates it)
-    const state = await loadState();
-
-    // Check daily limit
-    if (!(await canPublishToday(state, config.publishing.maxPerDay))) {
-      warn(`今日额度已满 (${state.todayPublishedCount}/${config.publishing.maxPerDay})，剩余草稿明天再发布。`);
-      break;
-    }
-
-    // Check interval
-    const mins = await minutesSinceLastPublish(state);
-    if (mins !== null && mins < config.publishing.minIntervalMinutes) {
-      const waitMin = Math.ceil(config.publishing.minIntervalMinutes - mins);
-      warn(`需等待 ${waitMin} 分钟后才能发布下一条。剩余草稿稍后再发布。`);
-      break;
-    }
-
-    info(`发布: ${draft.shopName} (${draft.id})`);
-    try {
-      await publishCommand(draft.id);
-      // Verify draft was actually published (publishCommand may return early on error)
-      const updated = await loadDraft(draft.id);
-      if (updated?.draft?.status === 'published') {
-        published++;
-      }
-    } catch (err) {
-      error(`发布失败: ${err}`);
-    }
-
-    await sleep(5000);
-  }
-
-  const finalState = await loadState();
   divider();
-  success(`批量完成: ${generated} 生成, ${published} 发布`);
-  if (published > 0) {
-    console.log(`  今日进度: ${finalState.todayPublishedCount}/${config.publishing.maxPerDay}`);
-  }
+  success(`批量完成: ${generated} 条草稿已生成`);
+  info('\n下一步：');
+  info('1. 半自动化：打开 data/publish-checklist.md，在 App 内手动发布');
+  info('2. 手机版：打开 data/mobile-checklist.html 获取手机友好的清单');
+  info('3. 全自动化：运行 app-publish 命令（需要 Android 环境）');
 }

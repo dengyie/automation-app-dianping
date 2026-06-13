@@ -1,4 +1,4 @@
-import { chromium, Browser, BrowserContext } from 'playwright';
+import { chromium, devices, Browser, BrowserContext } from 'playwright';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -119,6 +119,25 @@ export async function createContext(
 export async function saveSession(context: BrowserContext, sessionPath: string): Promise<void> {
   await mkdir(dirname(sessionPath), { recursive: true });
   await context.storageState({ path: sessionPath });
+}
+
+export async function createMobileContext(
+  browser: Browser,
+  config: AppConfig,
+  sessionPath?: string
+): Promise<BrowserContext> {
+  const device = devices['iPhone 15 Pro'];
+  const contextOptions: any = {
+    ...device,
+    locale: 'zh-CN',
+    timezoneId: 'Asia/Shanghai',
+  };
+  if (sessionPath && existsSync(sessionPath)) {
+    contextOptions.storageState = sessionPath;
+  }
+  const context = await browser.newContext(contextOptions);
+  await context.addInitScript(STEALTH_SCRIPT);
+  return context;
 }
 
 export function isLoggedIn(url: string): boolean {

@@ -1,0 +1,50 @@
+{
+  "shopId": "mock-shop-001",
+  "shopName": "老上海本帮菜·地道小炒",
+  "shopUrl": "https://www.dianping.com/shop/mock-shop-001",
+  "rating": 4.6,
+  "category": "本帮菜",
+  "pricePerPerson": 85,
+  "address": "黄浦区南京东路123号",
+  "recommendedDishes": [
+    {
+      "name": "红烧肉",
+      "description": "经典本帮红烧肉，肥而不腻，入口即化",
+      "price": 48,
+      "imageUrl": "https://example.com/hongshaorou.jpg"
+    },
+    {
+      "name": "响油鳝丝",
+      "description": "鳝鱼鲜嫩，浇热油激发香气，是店内招牌",
+      "price": 68,
+      "imageUrl": "https://example.com/shansi.jpg"
+    },
+    {
+      "name": "油爆虾",
+      "description": "河虾新鲜，壳脆肉嫩，油爆后香味四溢",
+      "price": 78,
+      "imageUrl": "https://example.com/youbaoxia.jpg"
+    }
+  ],
+  "reviews": [
+    {
+      "username": "美食达人小王",
+      "rating": 5,
+      "date": "2026-06-10",
+      "content": "红烧肉做得太棒了，肥瘦相间，入口即化。响油鳝丝也很地道，鳝鱼处理得很干净。服务员态度好，上菜速度快。环境干净整洁，很有老上海的感觉。"
+    },
+    {
+      "username": "吃货小李",
+      "rating": 4,
+      "date": "2026-06-08",
+      "content": "油爆虾很新鲜，虾肉Q弹。红烧肉稍微有点甜，不过整体味道不错。性价比挺高的，下次还会再来。"
+    },
+    {
+      "username": "上海土著",
+      "rating": 5,
+      "date": "2026-06-05",
+      "content": "正宗的本帮菜，响油鳝丝一浇油那个香啊！老板是上海人，手艺传承得很好。环境也布置得很有味道，推荐！"
+    }
+  ],
+  "scrapedAt": "2026-06-13T07:00:00Z"
+}

@@ -5,7 +5,14 @@ data/history.json
 data/state.json
 data/config.json
 data/photos/_downloaded/
+data/photos/prepared/
 data/captcha_debug/
+data/publish-checklist.md
+data/publish-checklist.json
+data/mobile-checklist.html
+data/shops.txt
 .env
 *.tmp
 *.bak
+.playwright-mcp/
+package-lock.json
