@@ -64,3 +64,12 @@ Production code quality review outcome:
 
 - Confirmed the documented Poetry path:
   `poetry install && poetry run pytest -q`.
+
+## 2026-06-18: Slidex Visual Platform Alignment
+
+### Completed
+
+- Documented that future Dianping OCR, captcha, screenshot recognition, and
+  manual visual fallback capabilities should be provided by `slidex`.
+- Kept the current repository free of visual-platform dependencies because no
+  Dianping workflow consumes them yet.
