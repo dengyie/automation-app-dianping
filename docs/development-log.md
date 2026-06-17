@@ -25,6 +25,16 @@
   completeness.
 - Risk: more Dianping-specific layers will still be needed in later plans.
 
+#### Decision: keep `poetry.lock` after verification
+
+- Problem: the final audit must verify the repository the same way CI will run
+  it, not just through manual venv commands.
+- Choice: run `poetry install && poetry run pytest -q` and keep the generated
+  lockfile.
+- Reason: the repository now declares a Poetry-based CI path, so the lockfile
+  is part of the reproducible baseline.
+- Risk: dependency updates become explicit version-control events.
+
 ### Verification
 
 ```bash
@@ -49,3 +59,8 @@ Production code quality review outcome:
   - keep Dianping-specific publishing or scraping flows out of the shared core
 - Quality score: 90
 - Pass status: pass
+
+### Final Audit Note
+
+- Confirmed the documented Poetry path:
+  `poetry install && poetry run pytest -q`.
