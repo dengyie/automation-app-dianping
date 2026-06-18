@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 import types
@@ -11,6 +12,7 @@ from automation_app_dianping.workflow import (
     build_android_screenshot_visual_request,
     create_workflow,
     describe_optional_capabilities,
+    solve_android_screenshot_visual_challenge,
     visual_result_to_workflow_payload,
 )
 
@@ -129,6 +131,23 @@ def test_visual_helpers_are_lazy_and_cover_default_offline_contract(monkeypatch)
     assert payload["action"]["success"] is True
     assert payload["events"][0]["task_id"] == "task-1"
 
+    class FakeVisualSolver:
+        async def solve(self, visual_request):
+            assert visual_request.context == "android_screenshot_bytes"
+            assert visual_request.image_bytes == b"fake"
+            return {"success": True}
+
+    visual_payload = asyncio.run(
+        solve_android_screenshot_visual_challenge(
+            visual_solver=FakeVisualSolver(),
+            screenshot_bytes=b"fake",
+            task_id="task-2",
+        )
+    )
+
+    assert visual_payload["action"]["success"] is True
+    assert visual_payload["events"][0]["task_id"] == "task-2"
+
 
 def test_build_android_screenshot_visual_request_uses_slidex_contract():
     pytest.importorskip("slidex")
@@ -165,3 +184,62 @@ def test_visual_result_to_workflow_payload_returns_json_safe_shapes():
     assert payload["events"][-1]["event_type"] == "task.end"
     assert payload["events"][-1]["payload"]["metadata"]["text"] == "dianping"
     json.dumps(payload)
+
+
+def test_solve_android_screenshot_visual_challenge_uses_provider_callback():
+    pytest.importorskip("slidex")
+
+    from slidex.vision import ChallengeType, VisualChallengeResult
+
+    class FakeVisualSolver:
+        def __init__(self):
+            self.requests = []
+
+        async def solve(self, request):
+            self.requests.append(request)
+            return VisualChallengeResult(
+                success=True,
+                challenge_type=request.challenge_type,
+                provider="fake",
+                metadata={"scene": request.metadata["scene"]},
+            )
+
+    solver = FakeVisualSolver()
+
+    payload = asyncio.run(
+        solve_android_screenshot_visual_challenge(
+            visual_solver=solver,
+            screenshot_provider=lambda: b"fake-png",
+            task_id="visual-1",
+            metadata={"scene": "startup"},
+        )
+    )
+
+    assert solver.requests[0].challenge_type == ChallengeType.IMAGE_TEXT
+    assert solver.requests[0].image_bytes == b"fake-png"
+    assert payload["action"]["success"] is True
+    assert payload["events"][-1]["payload"]["metadata"]["scene"] == "startup"
+
+
+def test_solve_android_screenshot_visual_challenge_returns_none_without_solver():
+    payload = asyncio.run(
+        solve_android_screenshot_visual_challenge(
+            visual_solver=None,
+            screenshot_bytes=b"fake",
+        )
+    )
+
+    assert payload is None
+
+
+def test_solve_android_screenshot_visual_challenge_requires_screenshot_input():
+    class FakeVisualSolver:
+        async def solve(self, request):
+            return {"success": True}
+
+    with pytest.raises(ValueError, match="screenshot_bytes or screenshot_provider"):
+        asyncio.run(
+            solve_android_screenshot_visual_challenge(
+                visual_solver=FakeVisualSolver(),
+            )
+        )

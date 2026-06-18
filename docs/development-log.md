@@ -170,3 +170,83 @@ bytes and decide how visual results are reported.
   - `.venv/bin/python -m pytest -q`: `6 passed, 2 skipped`, total coverage
     `100.00%`
   - slidex compatibility slice remains `2 passed, 4 deselected`
+
+## 2026-06-18: Phase 5 Dianping Live Visual Helper
+
+### Completed
+
+- Added `solve_android_screenshot_visual_challenge(...)` to connect Android
+  screenshot bytes, injected slidex visual solver, and workflow payload
+  conversion in one production-callable async helper.
+- Supported either direct `screenshot_bytes` or a `screenshot_provider` callback
+  so future Appium/ADB workflow code owns screenshot acquisition explicitly.
+- Added offline tests with fake slidex modules and fake visual solvers, proving
+  the helper does not require real Appium, ADB, device, browser, network, or
+  slidex installation in the default suite.
+- Added a failure-path test so missing screenshot input raises before slidex is
+  called.
+- Updated README usage guidance for production workflows that already own
+  Android screenshot bytes.
+
+### Decision Record
+
+#### Decision: accept screenshot bytes or a callback, not an Appium session
+
+- Problem: the current Dianping app repository does not own a concrete Appium
+  session API, but the next visual workflow phase must pass real screenshot
+  bytes into slidex.
+- Choice: make `solve_android_screenshot_visual_challenge(...)` accept direct
+  bytes or a zero-argument provider callback.
+- Reason: this completes the visual execution boundary while keeping Appium/ADB
+  lifecycle ownership in the future production workflow layer.
+- Risk: a later real-device E2E pass must still prove the callback captures the
+  expected screen at the correct workflow moment.
+
+### Verification
+
+Focused live-helper slice:
+
+```bash
+PYTHONPATH=/Users/mango/project/codex/automation-app-dianping:/Users/mango/project/codex/automation-kit:/Users/mango/project/codex/slidex /opt/homebrew/bin/pytest -q -o addopts='' tests/test_workflow.py -k 'solve_android_screenshot_visual_challenge'
+```
+
+Result:
+
+```text
+3 passed, 6 deselected
+```
+
+Default offline suite:
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+Result:
+
+```text
+8 passed, 3 skipped
+Total coverage: 94.59%
+Required coverage: 80%
+```
+
+### Production Code Quality Review
+
+Mode: checkpoint.
+
+Findings: no P0/P1/P2 correctness, boundary, safety, or irreversible operation
+issues found in the current diff.
+
+Improvement suggestions:
+
+- Keep the eventual real Appium/ADB screenshot E2E run opt-in because it
+  depends on device state and target app availability.
+
+Quality score: 91/100.
+
+Status: passed.
+
+### Todo Status
+
+- Live Android screenshot visual helper: done.
+- Real Appium/ADB screenshot E2E: pending opt-in production validation.
