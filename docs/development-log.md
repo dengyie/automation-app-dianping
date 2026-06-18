@@ -73,3 +73,91 @@ Production code quality review outcome:
   manual visual fallback capabilities should be provided by `slidex`.
 - Kept the current repository free of visual-platform dependencies because no
   Dianping workflow consumes them yet.
+
+## 2026-06-18: Phase 4 Dianping Slidex Injection Baseline
+
+### Completed
+
+- Added lazy slidex integration helpers in `automation_app_dianping.workflow`:
+  - `build_android_screenshot_visual_request(...)`
+  - `visual_result_to_workflow_payload(...)`
+- Added `describe_optional_capabilities(...)` so Dianping exposes the same
+  optional visual capability signal as Damai.
+- Extended `create_workflow(...)` with an optional `visual_solver` parameter
+  while preserving the offline Android smoke workflow behavior.
+- Added app-level compatibility tests for the latest slidex
+  `ANDROID_SCREENSHOT_BYTES` request contract and JSON-safe adapter payloads.
+- Kept default tests independent from slidex, browsers, devices, and network by
+  skipping real slidex checks when slidex is not import-visible.
+
+### Decision Record
+
+#### Decision: model Dianping visual input as Android screenshot bytes
+
+- Problem: Dianping is Android-oriented and does not naturally own a Playwright
+  page, so the Damai `PLAYWRIGHT_PAGE` contract would be the wrong default.
+- Choice: use `VisionContext.ANDROID_SCREENSHOT_BYTES` with
+  `ChallengeType.IMAGE_TEXT` for the app-level helper.
+- Reason: this matches the current automation-kit Android session boundary,
+  where screenshots are captured as artifacts or bytes before visual
+  interpretation.
+- Risk: real Appium/ADB integration must later provide actual screenshot bytes
+  and decide when OCR versus more specific visual providers are needed.
+
+### Verification
+
+Default offline suite:
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+Result:
+
+```text
+5 passed, 2 skipped
+Total coverage: 80.00%
+Required coverage: 80%
+```
+
+Slidex compatibility slice:
+
+```bash
+PYTHONPATH=/Users/mango/project/codex/automation-app-dianping:/Users/mango/project/codex/automation-kit:/Users/mango/project/codex/slidex /opt/homebrew/bin/pytest -q -o addopts='' tests/test_workflow.py -k 'visual_request or visual_result'
+```
+
+Result:
+
+```text
+2 passed, 3 deselected
+```
+
+### Production Code Quality Review
+
+Mode: checkpoint.
+
+Findings: no P0/P1/P2 correctness, boundary, safety, or irreversible operation
+issues found in the current diff.
+
+Improvement suggestions:
+
+- Raise default-suite coverage above the 80% floor when the next Dianping
+  workflow slice adds real Android behavior.
+
+Quality score: 88/100.
+
+Status: passed.
+
+### Todo Status
+
+- Dianping app-level slidex request helper: done.
+- Dianping app-level slidex adapter payload helper: done.
+- Default offline test independence: done.
+- Real Android screenshot acquisition and visual workflow execution: pending
+  future production workflow phase.
+
+### Next Phase Risk
+
+The current helper proves the contract but not a live Appium/ADB screenshot
+path. The next Dianping production workflow phase must provide real screenshot
+bytes and decide how visual results are reported.
