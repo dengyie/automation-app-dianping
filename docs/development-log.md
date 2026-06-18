@@ -161,3 +161,12 @@ Status: passed.
 The current helper proves the contract but not a live Appium/ADB screenshot
 path. The next Dianping production workflow phase must provide real screenshot
 bytes and decide how visual results are reported.
+
+### Follow-Up Hardening
+
+- Added a default-suite fake-module test for the lazy slidex helper paths so
+  coverage no longer sits exactly on the 80% threshold.
+- Verification:
+  - `.venv/bin/python -m pytest -q`: `6 passed, 2 skipped`, total coverage
+    `100.00%`
+  - slidex compatibility slice remains `2 passed, 4 deselected`

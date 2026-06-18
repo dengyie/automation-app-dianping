@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -75,6 +77,57 @@ def test_create_workflow_accepts_visual_solver_without_changing_offline_flow():
     result = workflow.run()
 
     assert result.success is True
+
+
+def test_visual_helpers_are_lazy_and_cover_default_offline_contract(monkeypatch):
+    slidex = types.ModuleType("slidex")
+    vision = types.ModuleType("slidex.vision")
+    integrations = types.ModuleType("slidex.integrations")
+    automation_kit = types.ModuleType("slidex.integrations.automation_kit")
+
+    class ChallengeType:
+        IMAGE_TEXT = "image_text"
+
+    class VisionContext:
+        ANDROID_SCREENSHOT_BYTES = "android_screenshot_bytes"
+
+    class VisualChallengeRequest:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    vision.ChallengeType = ChallengeType
+    vision.VisionContext = VisionContext
+    vision.VisualChallengeRequest = VisualChallengeRequest
+    automation_kit.to_action_result = lambda result, prefer_native=False: {
+        "success": result["success"]
+    }
+    automation_kit.to_artifacts = lambda result, prefer_native=False: [
+        {"artifact_type": "ocr", "path": "result.json"}
+    ]
+    automation_kit.to_events = lambda result, task_id=None, prefer_native=False: [
+        {"event_type": "task.end", "task_id": task_id}
+    ]
+
+    monkeypatch.setitem(sys.modules, "slidex", slidex)
+    monkeypatch.setitem(sys.modules, "slidex.vision", vision)
+    monkeypatch.setitem(sys.modules, "slidex.integrations", integrations)
+    monkeypatch.setitem(
+        sys.modules,
+        "slidex.integrations.automation_kit",
+        automation_kit,
+    )
+
+    request = build_android_screenshot_visual_request(
+        screenshot_bytes=b"fake",
+        provider="fake",
+    )
+    payload = visual_result_to_workflow_payload({"success": True}, task_id="task-1")
+
+    assert request.challenge_type == "image_text"
+    assert request.context == "android_screenshot_bytes"
+    assert request.image_bytes == b"fake"
+    assert payload["action"]["success"] is True
+    assert payload["events"][0]["task_id"] == "task-1"
 
 
 def test_build_android_screenshot_visual_request_uses_slidex_contract():
