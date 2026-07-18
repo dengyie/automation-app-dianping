@@ -37,6 +37,9 @@ class FakeDriver:
         return True
     def quit(self):
         self.closed = True
+    def press_keycode(self, code):
+        self.activated.append(("keycode", code))
+        return True
 
 
 def test_parse_locator_variants():
@@ -93,3 +96,22 @@ def test_more_session_paths(tmp_path):
     assert session.execute_action('unknown_action').success is False
     assert Path(session.capture_artifact('page_source','u.xml').path).exists()
 
+
+
+def test_confirm_search_and_dismiss(tmp_path):
+    driver = FakeDriver()
+    session = DianpingAppiumSession(driver=driver, artifact_root=tmp_path)
+    # button path
+    ok = session.execute_action("confirm_search", selector="~搜索")
+    assert ok.success
+    # keycode path when selectors missing
+    ok2 = session.execute_action("confirm_search", selector="uiautomator:missing", keycode=66)
+    assert ok2.success
+    dismissed = session.execute_action("dismiss_dialogs", selector="~ok", max_attempts=2)
+    assert dismissed.success
+    assert dismissed.data["dismissed"] >= 1
+    # failure dumps artifact
+    bad = session.execute_action("wait_for_element", selector="uiautomator:missing", timeout=0.2)
+    assert bad.success is False
+    dumps = list(Path(tmp_path).glob("fail-*.png")) + list(Path(tmp_path).glob("fail-*.xml"))
+    assert dumps

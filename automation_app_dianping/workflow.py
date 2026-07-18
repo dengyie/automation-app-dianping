@@ -196,10 +196,21 @@ def build_publish_steps(options, selectors):
 
     ratings = _ratings_from_parameters(parameters)
     photos = _photos_from_parameters(parameters)
+    allow_photos = parameters.get("allow_photos")
+    if allow_photos is None:
+        # Min-usable default: skip device photo picking unless explicitly enabled.
+        allow_photos = False
+    if not allow_photos:
+        photos = []
     app_id = options.app_id or DEFAULT_APP_ID
 
     steps = [
         WorkflowStep.action("launch_app", app_id=app_id),
+        WorkflowStep.action(
+            "dismiss_dialogs",
+            selector=getattr(selectors, "dialog_dismiss", ("确定",)),
+            max_attempts=3,
+        ),
         WorkflowStep.artifact("screenshot", "publish-launch.png"),
         WorkflowStep.action(
             "wait_for_element",
@@ -212,10 +223,16 @@ def build_publish_steps(options, selectors):
             selector=selectors.search_input,
             text=shop_name,
         ),
+        # Confirm search: soft button first, then ENTER keycode fallback.
+        WorkflowStep.action(
+            "confirm_search",
+            selector=getattr(selectors, "search_confirm", ("~搜索",)),
+            keycode=66,
+        ),
         WorkflowStep.action(
             "wait_for_element",
             selector=_shop_result_selector(selectors, shop_name),
-            timeout=10.0,
+            timeout=12.0,
         ),
         WorkflowStep.action(
             "tap",
@@ -245,7 +262,10 @@ def build_publish_steps(options, selectors):
         # Prefer platform semantic action (REQ-001). Fallback keeps offline
         # fake sessions working when adapter only knows tap/type primitives.
         for key, value in ratings.items():
-            selector = selectors.rating_star(key, value)
+            if hasattr(selectors, "rating_selector"):
+                selector = selectors.rating_selector(key, value)
+            else:
+                selector = selectors.rating_star(key, value)
             steps.append(
                 WorkflowStep.action(
                     "rate",
@@ -253,7 +273,7 @@ def build_publish_steps(options, selectors):
                     value=value,
                     selector=selector,
                     fallback_action="tap",
-                    fallback_selector=selector,
+                    fallback_selector=selector if isinstance(selector, str) else None,
                 )
             )
 
@@ -300,9 +320,18 @@ def build_publish_steps(options, selectors):
 
 def build_smoke_steps(options):
     app_id = options.app_id or DEFAULT_APP_ID
+    from automation_app_dianping.config import default_selectors
+
+    selectors = default_selectors()
     return [
         WorkflowStep.action("launch_app", app_id=app_id),
+        WorkflowStep.action(
+            "dismiss_dialogs",
+            selector=getattr(selectors, "dialog_dismiss", ("确定",)),
+            max_attempts=3,
+        ),
         WorkflowStep.artifact("screenshot", "startup.png"),
+        WorkflowStep.artifact("page_source", "startup.xml"),
     ]
 
 
@@ -313,7 +342,12 @@ class ComposedWorkflow:
         self.name = runtime.workflow_name
 
     def run(self):
-        return self.runtime.run(self.steps)
+        result = self.runtime.run(self.steps)
+        if not getattr(result, "success", False):
+            # Best-effort failure dump through a fresh/short session if runtime left none.
+            # Primary dumps happen inside DianpingAppiumSession on action failure.
+            pass
+        return result
 
 
 def create_workflow(session_factory, context, options, capability_executor=None):

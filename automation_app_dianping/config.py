@@ -20,6 +20,12 @@ class DianpingSelectors:
     search_input: SelectorValue = (
         'uiautomator:new UiSelector().className("android.widget.EditText")',
     )
+    search_confirm: SelectorValue = (
+        "~搜索",
+        'uiautomator:new UiSelector().text("搜索")',
+        'uiautomator:new UiSelector().description("搜索")',
+        'uiautomator:new UiSelector().textContains("搜索")',
+    )
     shop_result: SelectorValue = (
         'uiautomator:new UiSelector().className("android.widget.RelativeLayout").descriptionContains("店铺")',
     )
@@ -42,6 +48,15 @@ class DianpingSelectors:
     success: SelectorValue = (
         'uiautomator:new UiSelector().textContains("发布成功")',
         'uiautomator:new UiSelector().textContains("评价成功")',
+        'uiautomator:new UiSelector().textContains("审核中")',
+    )
+    dialog_dismiss: SelectorValue = (
+        'uiautomator:new UiSelector().text("我知道了")',
+        'uiautomator:new UiSelector().text("同意")',
+        'uiautomator:new UiSelector().text("确定")',
+        'uiautomator:new UiSelector().text("关闭")',
+        'uiautomator:new UiSelector().text("取消")',
+        "~关闭",
     )
     rating_stars: Dict[str, Dict[int, str]] = field(default_factory=dict)
 
@@ -54,6 +69,19 @@ class DianpingSelectors:
             raise ValueError("shop_name is required")
         safe = cleaned.replace("\\", "\\\\").replace('"', '\\"')
         return 'uiautomator:new UiSelector().textContains("%s")' % safe
+
+    def rating_selector(self, dimension: str, value: int) -> SelectorValue:
+        labels = {"taste": "口味", "environment": "环境", "service": "服务"}
+        label = labels.get(dimension, dimension)
+        # Prefer stars associated with the dimension label text; fall back to configured map.
+        primary = [
+            'uiautomator:new UiSelector().text("%s").fromParent(new UiSelector().className("android.widget.ImageView").instance(%s))' % (label, int(value) - 1),
+            'uiautomator:new UiSelector().descriptionContains("%s").childSelector(new UiSelector().className("android.widget.ImageView").instance(%s))' % (label, int(value) - 1),
+        ]
+        fallback = self.rating_star(dimension, value)
+        if fallback:
+            primary.append(fallback)
+        return tuple(primary)
 
     def photo_thumbnail_at(self, index: int) -> str:
         return 'uiautomator:new UiSelector().className("android.widget.ImageView").instance(%s)' % int(index)

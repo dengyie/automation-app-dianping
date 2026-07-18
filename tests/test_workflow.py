@@ -155,6 +155,7 @@ def test_publish_workflow_declares_business_success_path():
                 "content": content,
                 "ratings": {"taste": 5, "environment": 4, "service": 4},
                 "photos": ["data/photos/mock-shop-001/dish1.jpg"],
+                "allow_photos": True,
             },
         ),
     )
@@ -297,6 +298,7 @@ def test_build_publish_steps_prefer_semantic_actions():
                 "content": content,
                 "ratings": {"taste": 4, "environment": 3, "service": 4},
                 "photos": ["a.jpg", "b.jpg"],
+                "allow_photos": True,
             }
         ),
         default_selectors(),
@@ -352,3 +354,34 @@ def test_dianping_capability_runs_through_platform_executor_and_slidex_adapter()
     assert result.success is True
     assert result.steps[0].capability_result.provider == "slidex"
     assert result.steps[0].capability_result.data["metadata"]["text"] == "dianping"
+
+
+def test_publish_steps_include_search_confirm_and_skip_photos_by_default():
+    content = "内容足够长用于构造步骤" * 20
+    steps = build_publish_steps(
+        WorkflowOptions(
+            parameters={
+                "mode": "publish",
+                "shop_name": "店",
+                "content": content,
+                "ratings": {"taste": 4, "environment": 3, "service": 4},
+                "photos": ["a.jpg"],
+            }
+        ),
+        default_selectors(),
+    )
+    names = [step.name for step in steps if step.kind == "action"]
+    assert "confirm_search" in names
+    assert "dismiss_dialogs" in names
+    assert "pick_photos" not in names
+
+
+def test_smoke_steps_include_dismiss_and_page_source():
+    from automation_app_dianping.workflow import build_smoke_steps
+
+    steps = build_smoke_steps(WorkflowOptions(app_id="com.dianping.v1"))
+    names = [(step.kind, step.name) for step in steps]
+    assert ("action", "dismiss_dialogs") in names
+    assert ("artifact", "page_source") in names or any(
+        s.kind == "artifact" and s.name == "page_source" for s in steps
+    )

@@ -105,17 +105,40 @@ class DianpingAppiumSession:
                 pass
         self._started = False
 
+
+    def _dump_failure(self, label: str) -> None:
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(label))[:40] or "failure"
+        stamp = str(int(time.time()))
+        try:
+            self.capture_artifact("screenshot", "fail-%s-%s.png" % (safe, stamp))
+        except Exception:
+            pass
+        try:
+            self.capture_artifact("page_source", "fail-%s-%s.xml" % (safe, stamp))
+        except Exception:
+            pass
+
     def execute_action(self, action_name: str, **kwargs: Any) -> ActionResult:
         if action_name == "rate":
-            return self._rate(**kwargs)
-        if action_name == "pick_photos":
-            return self._pick_photos(**kwargs)
-        if action_name == "launch_app":
-            return self._launch_app(**kwargs)
-        if action_name in {"tap", "type_text", "wait_for_element"}:
-            return self._with_selector_fallbacks(action_name, kwargs)
-        failed = ActionResult(False, "unsupported appium action: %s" % action_name)
-        return self._maybe_fallback(action_name, kwargs, failed)
+            result = self._rate(**kwargs)
+        elif action_name == "pick_photos":
+            result = self._pick_photos(**kwargs)
+        elif action_name == "launch_app":
+            result = self._launch_app(**kwargs)
+        elif action_name == "confirm_search":
+            result = self._confirm_search(**kwargs)
+        elif action_name == "dismiss_dialogs":
+            result = self._dismiss_dialogs(**kwargs)
+        elif action_name == "press_keycode":
+            result = self._press_keycode(**kwargs)
+        elif action_name in {"tap", "type_text", "wait_for_element"}:
+            result = self._with_selector_fallbacks(action_name, kwargs)
+        else:
+            failed = ActionResult(False, "unsupported appium action: %s" % action_name)
+            result = self._maybe_fallback(action_name, kwargs, failed)
+        if not result.success:
+            self._dump_failure(action_name)
+        return result
 
     def capture_artifact(self, artifact_type: str, name: str) -> ArtifactHandle:
         path = self.artifact_root / name
@@ -293,6 +316,59 @@ class DianpingAppiumSession:
         except Exception as exc:
             return ActionResult(False, "timed out waiting for element: %s" % exc)
 
+
+
+    def _press_keycode(self, **kwargs: Any) -> ActionResult:
+        code = kwargs.get("keycode", kwargs.get("code", 66))
+        try:
+            code_i = int(code)
+        except Exception:
+            return ActionResult(False, "keycode must be int")
+        press = getattr(self.driver, "press_keycode", None)
+        if callable(press):
+            try:
+                press(code_i)
+                return ActionResult(True, "press_keycode", data={"keycode": code_i})
+            except Exception as exc:
+                return ActionResult(False, "press_keycode failed: %s" % exc)
+        execute_script = getattr(self.driver, "execute_script", None)
+        if callable(execute_script):
+            try:
+                execute_script("mobile: pressKey", {"keycode": code_i})
+                return ActionResult(True, "press_keycode", data={"keycode": code_i})
+            except Exception as exc:
+                return ActionResult(False, "press_keycode failed: %s" % exc)
+        return ActionResult(False, "driver does not support keycode press")
+
+    def _confirm_search(self, **kwargs: Any) -> ActionResult:
+        selector = kwargs.get("selector")
+        if selector is not None:
+            tapped = self._with_selector_fallbacks("tap", {"selector": selector, "timeout": kwargs.get("timeout", 2.0)})
+            if tapped.success:
+                return ActionResult(True, "confirm_search", data={"via": "tap"})
+        keycode = kwargs.get("keycode", 66)
+        pressed = self._press_keycode(keycode=keycode)
+        if pressed.success:
+            return ActionResult(True, "confirm_search", data={"via": "keycode", "keycode": keycode})
+        # Not fatal for offline fakes: treat soft-fail as success with warning so steps can continue
+        # only if both failed - still fail.
+        return ActionResult(False, "confirm_search failed: no search button and keycode unavailable")
+
+    def _dismiss_dialogs(self, **kwargs: Any) -> ActionResult:
+        selector = kwargs.get("selector")
+        max_attempts = int(kwargs.get("max_attempts", 3) or 3)
+        dismissed = 0
+        for _ in range(max(max_attempts, 1)):
+            result = self._with_selector_fallbacks(
+                "tap",
+                {"selector": selector, "timeout": float(kwargs.get("timeout", 1.0))},
+            )
+            if not result.success:
+                break
+            dismissed += 1
+            time.sleep(0.2)
+        # Success even if nothing to dismiss - this is best-effort hygiene.
+        return ActionResult(True, "dismiss_dialogs", data={"dismissed": dismissed})
 
 def device_config_from_env(env: Optional[dict] = None, *, base: Optional[DianpingDeviceConfig] = None) -> DianpingDeviceConfig:
     source = env if env is not None else os.environ

@@ -130,6 +130,8 @@ python -m pytest -q
 5. DIANPING_LIVE_E2E=1 python -m automation_app_dianping live --mode publish --draft-id <id>
 
 产物: artifacts/dianping-live/ ; 选择器: automation_app_dianping/config.py
+
+最小真机建议：先 smoke，再无图 publish（默认跳过相册；需要时传 parameters.allow_photos=true）。失败会自动 dump screenshot/page_source 到产物目录。
 ## 遗留 TypeScript CLI
 
 `src/` 仍保留迁移期半自动抓取 / 生成 / 清单命令。
