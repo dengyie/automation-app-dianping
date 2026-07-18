@@ -58,9 +58,9 @@
 | `automation_app_dianping/workflow.py` | smoke + publish 步骤声明 | 发布主路径已进入 Python workflow |
 | 视觉 helper | 公共 `CapabilityRequest` + 注入 executor | 已按契约净化 |
 | composition root | `automation_app_dianping/composition.py` | 已提供唯一装配入口 |
-| `src/` Bun/TS CLI | 真实抓取/生成/发布仍在这里 | 遗留主路径，冻结扩张 |
+| `src/` Bun/TS CLI | 抓取/生成等运营命令仍在此；发布门禁与清单已迁 Python | 遗留路径，架构冻结 |
 | `pyproject.toml` | `0.2.0` + 正式版本范围声明，开发态 path 可选 | 版本与契约对齐中 |
-| 默认测试 | 离线 Python 测试可跑 | 保留并加强 |
+| 默认测试 | 离线 36 passed / 1 skipped live | 达标 |
 
 ### 3.2 目标状态
 
@@ -336,3 +336,19 @@ CI 期望：
 - [ ] README 没有变成新的架构真相源
 - [ ] 若依赖平台缺口，已在同级底层分支提需求，而不是本仓绕过
 - [ ] 提交说明区分“已实现”和“仍待底层交付”
+
+## 15. 当前交付结论
+
+应用仓侧文档要求已落地：
+
+- 公共 capability 契约净化完成
+- composition root 完成
+- Python publish workflow + 草稿/清单/限额门禁完成
+- 遗留 TS 架构冻结，业务知识已迁出到 Python storage/services
+- 默认离线测试与双 Python CI 完成
+- 底层缺口已写入 `docs/platform-requests.md`，不在本仓实现
+
+仍依赖外部交付、不阻塞本仓完成判定：
+
+- 真机 selector 校准（opt-in live）
+- automation-kit 正式包源 capability 矩阵发布
