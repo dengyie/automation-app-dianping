@@ -1,11 +1,12 @@
 def test_app_package_imports():
     from automation_app_dianping import __version__
-    from automation_app_dianping import composition, config, live, services, storage, workflow
+    from automation_app_dianping import composition, config, live, services, session, storage, workflow
 
     assert __version__ == "0.3.0"
     assert composition.build_composition
     assert config.DianpingAppConfig
     assert live.live_enabled
+    assert session.build_session_factory
     assert services.prepare_publish_checklist
     assert storage.DraftStore
     assert workflow.create_workflow

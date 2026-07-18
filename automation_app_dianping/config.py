@@ -1,25 +1,62 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Sequence, Union
+
+SelectorValue = Union[str, Sequence[str]]
+
+
+def as_selector_list(value: SelectorValue) -> List[str]:
+    if isinstance(value, str):
+        return [value]
+    return [item for item in value if isinstance(item, str) and item.strip()]
 
 
 @dataclass(frozen=True)
 class DianpingSelectors:
-    search_bar: str = "search_bar"
-    search_input: str = "search_input"
-    shop_result: str = "shop_result"
-    write_review: str = "write_review"
-    review_input: str = "review_input"
-    rating_panel: str = "rating_panel"
-    add_photo: str = "add_photo"
-    photo_thumbnail: str = "photo_thumbnail"
-    photo_confirm: str = "photo_confirm"
-    submit: str = "submit"
-    success: str = "publish_success"
+    search_bar: SelectorValue = (
+        "id:com.dianping.v1:id/search_bar",
+        'uiautomator:new UiSelector().resourceId("com.dianping.v1:id/search_bar")',
+        "~搜索",
+    )
+    search_input: SelectorValue = (
+        'uiautomator:new UiSelector().className("android.widget.EditText")',
+    )
+    shop_result: SelectorValue = (
+        'uiautomator:new UiSelector().className("android.widget.RelativeLayout").descriptionContains("店铺")',
+    )
+    write_review: SelectorValue = (
+        "~写评价",
+        'uiautomator:new UiSelector().text("写评价")',
+        'uiautomator:new UiSelector().textContains("写点评")',
+    )
+    review_input: SelectorValue = (
+        "id:com.dianping.v1:id/review_content",
+        'uiautomator:new UiSelector().className("android.widget.EditText").instance(0)',
+    )
+    rating_panel: SelectorValue = ('uiautomator:new UiSelector().text("口味")',)
+    add_photo: SelectorValue = ("~添加图片", 'uiautomator:new UiSelector().textContains("添加图片")')
+    photo_thumbnail: SelectorValue = (
+        'uiautomator:new UiSelector().className("android.widget.ImageView").instance(0)',
+    )
+    photo_confirm: SelectorValue = ("~完成", 'uiautomator:new UiSelector().text("完成")')
+    submit: SelectorValue = ("~发布", 'uiautomator:new UiSelector().text("发布")')
+    success: SelectorValue = (
+        'uiautomator:new UiSelector().textContains("发布成功")',
+        'uiautomator:new UiSelector().textContains("评价成功")',
+    )
     rating_stars: Dict[str, Dict[int, str]] = field(default_factory=dict)
 
     def rating_star(self, dimension: str, value: int) -> Optional[str]:
-        stars = self.rating_stars.get(dimension) or {}
-        return stars.get(value)
+        return (self.rating_stars.get(dimension) or {}).get(value)
+
+    def shop_name_selector(self, shop_name: str) -> str:
+        cleaned = (shop_name or "").strip()
+        if not cleaned:
+            raise ValueError("shop_name is required")
+        safe = cleaned.replace("\\", "\\\\").replace('"', '\\"')
+        return 'uiautomator:new UiSelector().textContains("%s")' % safe
+
+    def photo_thumbnail_at(self, index: int) -> str:
+        return 'uiautomator:new UiSelector().className("android.widget.ImageView").instance(%s)' % int(index)
 
 
 @dataclass(frozen=True)
@@ -30,12 +67,29 @@ class DianpingPublishPolicy:
 
 
 @dataclass(frozen=True)
+class DianpingDeviceConfig:
+    app_id: str = "com.dianping.v1"
+    activity: str = "com.dianping.main.guide.SplashScreenActivity"
+    host: str = "127.0.0.1"
+    port: int = 4723
+    path: str = "/"
+    udid: Optional[str] = None
+    device_name: str = "Android"
+    platform_version: Optional[str] = None
+    no_reset: bool = True
+    auto_grant_permissions: bool = True
+    new_command_timeout: int = 300
+    artifact_root: str = "artifacts/dianping-live"
+
+
+@dataclass(frozen=True)
 class DianpingAppConfig:
     city: str
     app_id: str = "com.dianping.v1"
     activity: str = "com.dianping.main.guide.SplashScreenActivity"
-    selectors: DianpingSelectors = field(default_factory=DianpingSelectors)
+    selectors: DianpingSelectors = field(default_factory=lambda: default_selectors())
     publish: DianpingPublishPolicy = field(default_factory=DianpingPublishPolicy)
+    device: DianpingDeviceConfig = field(default_factory=DianpingDeviceConfig)
 
     def __post_init__(self):
         if not isinstance(self.city, str) or not self.city.strip():
@@ -53,23 +107,18 @@ class DianpingAppConfig:
 
 
 def default_selectors() -> DianpingSelectors:
+    def stars(start: int):
+        return {
+            i: 'uiautomator:new UiSelector().className("android.widget.ImageView").instance(%s)'
+            % (start + i - 1)
+            for i in range(1, 6)
+        }
+
     return DianpingSelectors(
         rating_stars={
-            "taste": {1: "taste_star_1", 2: "taste_star_2", 3: "taste_star_3", 4: "taste_star_4", 5: "taste_star_5"},
-            "environment": {
-                1: "environment_star_1",
-                2: "environment_star_2",
-                3: "environment_star_3",
-                4: "environment_star_4",
-                5: "environment_star_5",
-            },
-            "service": {
-                1: "service_star_1",
-                2: "service_star_2",
-                3: "service_star_3",
-                4: "service_star_4",
-                5: "service_star_5",
-            },
+            "taste": stars(0),
+            "environment": stars(5),
+            "service": stars(10),
         }
     )
 

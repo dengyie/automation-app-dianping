@@ -118,6 +118,18 @@ python -m pytest -q
 - live 路径显式 opt-in，不进默认门禁
 - CI：Python 3.8 / 3.11
 
+
+## 真机 / 模拟器 Live 运行
+
+> 需要: export DIANPING_LIVE_E2E=1
+
+1. pip install -e ".[live]"
+2. adb devices && appium
+3. python -m automation_app_dianping doctor
+4. DIANPING_LIVE_E2E=1 DIANPING_DEVICE_UDID=emulator-5554 python -m automation_app_dianping live --mode smoke
+5. DIANPING_LIVE_E2E=1 python -m automation_app_dianping live --mode publish --draft-id <id>
+
+产物: artifacts/dianping-live/ ; 选择器: automation_app_dianping/config.py
 ## 遗留 TypeScript CLI
 
 `src/` 仍保留迁移期半自动抓取 / 生成 / 清单命令。

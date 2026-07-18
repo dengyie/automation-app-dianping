@@ -24,7 +24,8 @@ def test_dianping_app_config_rejects_blank_city():
 
 def test_default_selectors_expose_rating_star_lookup():
     selectors = default_selectors()
-    assert selectors.rating_star("taste", 4) == "taste_star_4"
+    star = selectors.rating_star("taste", 4)
+    assert isinstance(star, str) and "UiSelector" in star
     assert selectors.rating_star("taste", 9) is None
 
 

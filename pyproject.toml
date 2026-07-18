@@ -15,6 +15,10 @@ dev = [
     "pytest>=8,<9",
     "pytest-cov>=5,<6",
 ]
+live = [
+    "Appium-Python-Client>=4.0.0",
+    "selenium>=4.0.0",
+]
 
 # Local Poetry path dependency is developer convenience only.
 # Packaging/build backend remains setuptools with [project] metadata.
@@ -63,6 +67,8 @@ source = ["automation_app_dianping"]
 omit = [
     "*/tests/*",
     "*/__init__.py",
+    "*/cli.py",
+    "*/__main__.py",
 ]
 
 [tool.coverage.report]

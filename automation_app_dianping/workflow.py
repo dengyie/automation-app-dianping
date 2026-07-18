@@ -161,6 +161,30 @@ def _photos_from_parameters(parameters):
     return cleaned
 
 
+def _shop_result_selector(selectors, shop_name):
+    candidates = []
+    shop_name_selector = getattr(selectors, "shop_name_selector", None)
+    if callable(shop_name_selector):
+        try:
+            candidates.append(shop_name_selector(shop_name))
+        except Exception:
+            pass
+    generic = getattr(selectors, "shop_result", None)
+    if generic is not None:
+        if isinstance(generic, (list, tuple)):
+            candidates.extend(list(generic))
+        else:
+            candidates.append(generic)
+    seen = set()
+    ordered = []
+    for item in candidates:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered if len(ordered) != 1 else ordered[0]
+
+
 def build_publish_steps(options, selectors):
     parameters = dict(getattr(options, "parameters", None) or {})
     shop_name = _string_param(parameters, "shop_name")
@@ -190,10 +214,13 @@ def build_publish_steps(options, selectors):
         ),
         WorkflowStep.action(
             "wait_for_element",
-            selector=selectors.shop_result,
+            selector=_shop_result_selector(selectors, shop_name),
             timeout=10.0,
         ),
-        WorkflowStep.action("tap", selector=selectors.shop_result),
+        WorkflowStep.action(
+            "tap",
+            selector=_shop_result_selector(selectors, shop_name),
+        ),
         WorkflowStep.action(
             "wait_for_element",
             selector=selectors.write_review,
@@ -245,7 +272,7 @@ def build_publish_steps(options, selectors):
                     *[
                         {
                             "action": "tap",
-                            "selector": selectors.photo_thumbnail,
+                            "selector": (selectors.photo_thumbnail_at(index) if hasattr(selectors, "photo_thumbnail_at") else selectors.photo_thumbnail),
                             "photo_path": photo,
                             "photo_index": index,
                         }
