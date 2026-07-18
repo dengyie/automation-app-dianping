@@ -1,6 +1,6 @@
 # 平台需求清单（应用侧提出）
 
-本文件只记录 `automation-app-dianping` 向底层提出的能力缺口。  
+本文件只记录 `automation-app-dianping` 向底层提出的能力缺口。
 实现发生在同级 `automation-kit` / `slidex` Codex 分支，不在本仓补底层。
 
 ## REQ-001 Appium 业务动作语义增强

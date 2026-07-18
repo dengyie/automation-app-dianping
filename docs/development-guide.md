@@ -2,14 +2,14 @@
 
 最后更新：2026-07-19
 
-本文是点评应用仓的唯一应用级开发基线。  
+本文是点评应用仓的唯一应用级开发基线。
 平台公共契约、内核设计与跨仓版本策略，只消费
 [automation-kit/docs/development.md](https://github.com/dengyie/automation-kit/blob/main/docs/development.md)
 （若该文件尚未合入 `main`，以 `automation-kit` 最新架构分支中的同名文档为准）。
 
 ## 0. 一句话契约
 
-本仓只做**基于 automation-kit 的顶层点评应用**。  
+本仓只做**基于 automation-kit 的顶层点评应用**。
 不实现底层，不复制底层，不够用就去同级 Codex 分支向底层提需求。
 
 给开发 agent 的最短指令：
