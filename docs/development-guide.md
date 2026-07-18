@@ -59,7 +59,7 @@
 | 视觉 helper | 公共 `CapabilityRequest` + 注入 executor | 已按契约净化 |
 | composition root | `automation_app_dianping/composition.py` | 已提供唯一装配入口 |
 | `src/` Bun/TS CLI | 抓取/生成等运营命令仍在此；发布门禁与清单已迁 Python | 遗留路径，架构冻结 |
-| `pyproject.toml` | `0.2.0` + 正式版本范围声明，开发态 path 可选 | 版本与契约对齐中 |
+| `pyproject.toml` | `0.3.0` + 正式版本范围声明，开发态 path 可选 | 版本与契约对齐中 |
 | 默认测试 | 离线 pytest + coverage gate | 达标 |
 
 ### 3.2 目标状态
@@ -114,7 +114,7 @@ docs/development-log.md
 
 | 依赖 | 角色 | 约束 |
 | --- | --- | --- |
-| `automation-kit` | 必需平台 | 只依赖公共导出；目标消费范围 `>=0.2.0,<0.3.0` |
+| `automation-kit` | 必需平台 | 只依赖公共导出；正式消费范围 `>=0.3.0,<0.3.0` |
 | `slidex` | 可选视觉 provider | 默认非硬依赖；只在 composition root 装配 |
 | 设备 / Appium / 浏览器 | live 依赖 | 默认测试与默认 CI 不得要求 |
 
@@ -142,8 +142,8 @@ workflow 模块不得自己 new 出 live provider。
 
 只声明业务过程：
 
-- 使用 `ManagedWorkflow` / `WorkflowStep.action(...)`
-- V2 就绪后使用 `WorkflowStep.capability(...)`
+- 使用 `WorkflowRuntime` / `WorkflowStep.action(...)`
+- 已使用 `WorkflowStep.capability(...)`
 - 接受注入的 `session_factory`、`capability_executor`、`context`、`options`
 - 返回平台 `WorkflowResult`，不自造生命周期字典
 
@@ -322,7 +322,7 @@ CI 期望：
 3. **文档收敛**：README / 遗留说明已指向应用开发指南。
 4. **发布主路径迁移**：Python publish workflow、草稿/清单/限额门禁已落地；publish 已声明 `rate`/`pick_photos` 语义动作并带 tap fallback（REQ-001）；live selector 真机校准仍 opt-in。
 5. **遗留 TS 冻结执行**：`src/` 架构扩张已冻结；业务知识已迁到 Python storage/services。
-6. **版本与 CI 对齐**：app `0.2.0`、双 Python 离线 CI 已对齐；`[project]` 为发布真相源、Poetry path 仅本地；CI 用 `AUTOMATION_KIT_CAPABILITY_FALLBACK_REFS` 显式回退并在缺失时硬失败（REQ-003）。
+6. **版本与 CI 对齐**：app `0.3.0`、双 Python 离线 CI 已对齐；`[project]` 为发布真相源、Poetry path 仅本地；CI 用 `sibling automation-kit main` 显式回退并在缺失时硬失败（REQ-003）。
 7. **底层提需**：已在 `docs/platform-requests.md` 记录 adapter/capability/发布矩阵缺口。
 
 ## 12. 完成定义

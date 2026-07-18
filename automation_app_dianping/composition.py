@@ -19,29 +19,14 @@ def _require_capabilities():
         from automation_core.capabilities import (
             CapabilityExecutor,
             CapabilityRegistry,
+            CapabilityResolver,
         )
     except ImportError as exc:
         raise ImportError(
             "automation-kit capability contracts are required; "
             "install automation-kit with capability platform support"
         ) from exc
-
-    try:
-        from automation_core.capabilities import CapabilityResolver
-    except ImportError:
-        CapabilityResolver = None
     return CapabilityRegistry, CapabilityExecutor, CapabilityResolver
-
-
-def _build_executor(CapabilityExecutor, CapabilityResolver, registry):
-    if CapabilityResolver is not None:
-        # V2 style: executor(resolver)
-        try:
-            return CapabilityExecutor(CapabilityResolver(registry))
-        except TypeError:
-            pass
-    # V1 style: executor(registry)
-    return CapabilityExecutor(registry)
 
 
 def build_composition(
@@ -53,7 +38,7 @@ def build_composition(
 ) -> DianpingComposition:
     """Build an isolated app composition.
 
-    - Registry/executor are created here unless injected for tests.
+    - Registry/resolver/executor are created here unless injected for tests.
     - Slidex is optional and only imported when explicitly enabled.
     - No global singleton is used.
     """
@@ -80,7 +65,7 @@ def build_composition(
     if capability_executor is not None:
         executor = capability_executor
     else:
-        executor = _build_executor(CapabilityExecutor, CapabilityResolver, registry)
+        executor = CapabilityExecutor(CapabilityResolver(registry))
 
     return DianpingComposition(
         capability_registry=registry,

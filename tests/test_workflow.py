@@ -9,6 +9,7 @@ from automation_runner import WorkflowContext, WorkflowOptions
 from automation_app_dianping.workflow import (
     build_android_screenshot_capability_request,
     build_publish_steps,
+    create_capability_steps,
     create_workflow,
     solve_android_screenshot_capability,
 )
@@ -68,6 +69,13 @@ def test_build_android_screenshot_capability_request_uses_platform_contract_only
     assert request.parameters["image_bytes"] == b"fake-png"
     assert request.parameters["metadata"]["scene"] == "startup"
     assert request.metadata == {"run_id": "run-1", "task_id": "task-1"}
+
+
+def test_create_capability_steps_uses_platform_request_contract():
+    steps = create_capability_steps(screenshot_bytes=b"fake-png")
+
+    assert steps[0].kind == "capability"
+    assert steps[0].request.parameters["image_bytes"] == b"fake-png"
 
 
 def test_solve_android_screenshot_capability_returns_none_without_executor():
@@ -305,3 +313,42 @@ def test_build_publish_steps_prefer_semantic_actions():
     assert pick_steps[0].parameters["fallback_action"] == "tap"
     assert isinstance(pick_steps[0].parameters["fallback_steps"], list)
     assert pick_steps[0].parameters["fallback_steps"][0]["action"] == "tap"
+
+
+def test_dianping_capability_runs_through_platform_executor_and_slidex_adapter():
+    pytest.importorskip("slidex")
+    from slidex.integrations.automation_kit import SlidexVisualCapability
+    from slidex.vision import VisualChallengeResult
+    from automation_app_dianping.workflow import create_capability_steps
+    from automation_core.capabilities import (
+        CapabilityExecutor,
+        CapabilityRegistry,
+        CapabilityResolver,
+    )
+    from automation_runner.runtime import WorkflowRuntime
+
+    class FakeVisualSolver:
+        async def solve(self, request):
+            assert request.metadata["run_id"] == "run-1"
+            assert request.metadata["task_id"]
+            return VisualChallengeResult(
+                success=True,
+                challenge_type=request.challenge_type,
+                provider="fake-ocr",
+                metadata={"text": "dianping"},
+            )
+
+    session = FakeSession()
+    registry = CapabilityRegistry()
+    registry.register(SlidexVisualCapability(visual_solver=FakeVisualSolver()))
+    runtime = WorkflowRuntime(
+        session_factory=lambda: session,
+        capability_executor=CapabilityExecutor(CapabilityResolver(registry)),
+        workflow_name="dianping-android",
+        run_id="run-1",
+    )
+    result = runtime.run(create_capability_steps(screenshot_bytes=b"fake-png"))
+
+    assert result.success is True
+    assert result.steps[0].capability_result.provider == "slidex"
+    assert result.steps[0].capability_result.data["metadata"]["text"] == "dianping"

@@ -93,21 +93,6 @@ def test_require_capabilities_missing_module(monkeypatch):
         composition_module._require_capabilities()
 
 
-def test_build_executor_falls_back_to_registry_style():
-    class Registry:  # pragma: no cover - simple stub
-        pass
-
-    class Executor:
-        def __init__(self, registry):
-            self.registry = registry
-
-    class BadResolver:
-        def __init__(self, registry):
-            raise TypeError("resolver unsupported")
-
-    executor = composition_module._build_executor(Executor, BadResolver, Registry())
-    assert isinstance(executor, Executor)
-
 
 def test_build_composition_accepts_injected_executor_and_registers_slidex(monkeypatch):
     class FakeRegistry:

@@ -24,7 +24,7 @@
 ```bash
 python -m pip install -e .
 # 等价于消费发布元数据：
-# automation-kit>=0.2.0,<0.3.0
+# automation-kit>=0.3.0,<0.4.0
 ```
 
 `pyproject.toml` 的 `[project]` 段是发布真相源。

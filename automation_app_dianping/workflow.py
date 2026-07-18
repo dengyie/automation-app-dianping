@@ -1,4 +1,7 @@
-from automation_runner.workflows import ManagedWorkflow, WorkflowStep, run_workflow_steps
+from automation_core.capabilities import CapabilityRequest
+from automation_runner.policies import CapabilityPolicy
+from automation_runner.runtime import WorkflowRuntime
+from automation_runner.steps import WorkflowStep
 
 DEFAULT_APP_ID = "com.dianping.v1"
 DEFAULT_WORKFLOW_NAME = "dianping-android"
@@ -13,8 +16,6 @@ def build_android_screenshot_capability_request(
     task_id: str = None,
 ):
     """Assemble a public capability request. No provider internals."""
-    from automation_core.capabilities import CapabilityRequest
-
     request_metadata = {}
     if run_id is not None:
         request_metadata["run_id"] = run_id
@@ -50,7 +51,6 @@ async def _execute_capability(capability_executor, request, run_id=None, task_id
     if not callable(execute):
         raise TypeError("capability_executor must provide execute or aexecute")
 
-    # V2 executor requires ExecutionContext.
     try:
         from automation_core.execution import ExecutionContext
     except ImportError:
@@ -80,7 +80,11 @@ async def solve_android_screenshot_capability(
     run_id: str = None,
     task_id: str = None,
 ):
-    """Execute visual.challenge through an injected public executor."""
+    """Execute visual.challenge through an injected public executor.
+
+    Preferred production path is WorkflowStep.capability via WorkflowRuntime.
+    This helper remains for ad-hoc composition-root validation and tests.
+    """
     if capability_executor is None:
         return None
 
@@ -103,6 +107,21 @@ async def solve_android_screenshot_capability(
         run_id=run_id,
         task_id=task_id,
     )
+
+
+def create_capability_steps(*, screenshot_bytes: bytes, provider: str = "auto", metadata=None):
+    """Build runtime capability steps for screenshot recognition."""
+    return [
+        WorkflowStep.capability(
+            "ocr-screenshot",
+            request=build_android_screenshot_capability_request(
+                screenshot_bytes=screenshot_bytes,
+                provider=provider,
+                metadata=metadata,
+            ),
+            policy=CapabilityPolicy(timeout=30.0, max_attempts=1, backoff=0.0),
+        )
+    ]
 
 
 def _string_param(parameters, key, default=None):
@@ -260,15 +279,23 @@ def build_smoke_steps(options):
     ]
 
 
+class ComposedWorkflow:
+    def __init__(self, runtime, steps):
+        self.runtime = runtime
+        self.steps = steps
+        self.name = runtime.workflow_name
+
+    def run(self):
+        return self.runtime.run(self.steps)
+
+
 def create_workflow(session_factory, context, options, capability_executor=None):
-    """Create a Dianping workflow.
+    """Create a Dianping workflow on WorkflowRuntime.
 
-    capability_executor is accepted for composition-root injection. Smoke/publish
-    steps currently use action/artifact primitives; visual challenges use helper
-    APIs with the injected executor.
+    capability_executor is injected from the composition root. Smoke/publish
+    steps currently use action/artifact primitives; visual challenges use
+    WorkflowStep.capability or solve_android_screenshot_capability.
     """
-    del capability_executor
-
     parameters = dict(getattr(options, "parameters", None) or {})
     mode = (_string_param(parameters, "mode", "smoke") or "smoke").lower()
 
@@ -281,8 +308,9 @@ def create_workflow(session_factory, context, options, capability_executor=None)
     else:
         raise ValueError("unsupported workflow mode: %s" % mode)
 
-    return ManagedWorkflow(
-        name=context.workflow_name or DEFAULT_WORKFLOW_NAME,
+    runtime = WorkflowRuntime(
         session_factory=session_factory,
-        run_fn=lambda session: run_workflow_steps(session, steps),
+        capability_executor=capability_executor,
+        workflow_name=context.workflow_name or DEFAULT_WORKFLOW_NAME,
     )
+    return ComposedWorkflow(runtime, steps)

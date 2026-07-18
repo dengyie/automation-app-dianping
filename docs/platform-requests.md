@@ -58,7 +58,7 @@
 - 当前阻塞：主线 automation-kit 发布包可能尚未含 capability 模块
 
 ## 需要的公共能力
-- 已发布 `automation-kit>=0.2` wheel 包含 `automation_core.capabilities` 稳定导出
+- 已发布 `automation-kit>=0.3` wheel 包含 `automation_core.capabilities` 稳定导出
 
 ## 为什么不能在 app 内解决
 - app 不能 vendoring 平台内核
@@ -67,6 +67,6 @@
 - 从正式包源安装后，本仓默认离线测试通过
 
 ## 应用侧过渡策略（CI）
-- CI 通过 `AUTOMATION_KIT_CAPABILITY_FALLBACK_REFS` 有序回退到含 capability 的 kit 分支
+- CI 通过 `sibling automation-kit main checkout` 有序回退到含 capability 的 kit 分支
 - 主线/正式包源含 `automation_core.capabilities` 后，应清空该 env 并只装正式版本
 - 回退失败时 CI 硬失败并指向 REQ-003，不再静默装无 capability 的 kit

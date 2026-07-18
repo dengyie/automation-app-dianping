@@ -1,13 +1,13 @@
 [project]
 name = "automation-app-dianping"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dianping application workflows built on automation-kit"
 authors = [{ name = "mango" }]
 readme = "README.md"
 requires-python = ">=3.8,<4.0"
 # Release / CI install surface: published version range only (no sibling path).
 dependencies = [
-    "automation-kit>=0.2.0,<0.3.0",
+    "automation-kit>=0.3.0,<0.4.0",
 ]
 
 [project.optional-dependencies]
@@ -20,7 +20,7 @@ dev = [
 # Packaging/build backend remains setuptools with [project] metadata.
 [tool.poetry]
 name = "automation-app-dianping"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dianping application workflows built on automation-kit"
 authors = ["mango"]
 readme = "README.md"
