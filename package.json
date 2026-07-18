@@ -1,0 +1,24 @@
+{
+  "name": "dianping",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "login": "bun run src/index.ts login",
+    "check": "bun run src/index.ts check",
+    "discover": "bun run src/index.ts discover",
+    "scrape": "bun run src/index.ts scrape",
+    "generate": "bun run src/index.ts generate",
+    "publish": "bun run src/index.ts publish",
+    "batch": "bun run src/index.ts batch",
+    "status": "bun run src/index.ts status"
+  },
+  "dependencies": {
+    "@playwright/mcp": "^0.0.75",
+    "@wdio/cli": "^9.28.0",
+    "appium": "^3.5.0",
+    "webdriverio": "^9.28.0"
+  },
+  "devDependencies": {
+    "appium-uiautomator2-driver": "^7.6.1"
+  }
+}
