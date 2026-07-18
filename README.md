@@ -15,8 +15,8 @@ AI 驱动的大众点评评价生成与发布工具。
 - `tests/`：Python 工作流的离线测试
 - `data/`：本地运行数据；账号会话和个人配置默认不提交
 
-Python 工作流需要相邻目录中的 `automation-kit`，默认离线测试不依赖浏览器、设备或网络。
-视觉挑战能力通过可选的 `slidex` 应用层依赖注入。
+Python 工作流需要 `automation-kit` 公共契约，默认离线测试不依赖浏览器、设备或网络。
+视觉能力通过公共 `visual.challenge` 契约请求；Slidex 仅作为可选 provider 在 composition root 装配。
 
 ## 特性
 
