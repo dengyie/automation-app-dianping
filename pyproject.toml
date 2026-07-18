@@ -6,7 +6,7 @@ authors = [{ name = "mango" }]
 readme = "README.md"
 requires-python = ">=3.8,<4.0"
 dependencies = [
-    "automation-kit>=0.2.0,<0.4.0",
+    "automation-kit>=0.2.0,<0.3.0",
 ]
 
 [tool.poetry]

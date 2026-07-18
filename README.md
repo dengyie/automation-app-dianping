@@ -7,8 +7,9 @@
 
 ## 项目组成
 
-- `automation_app_dianping/`：Python 应用层（config / workflow / composition）
+- `automation_app_dianping/`：Python 应用层（config / workflow / composition / storage / services / live）
 - `tests/`：默认离线测试
+- `docs/platform-requests.md`：向底层提需清单
 - `src/`：遗留 Bun/TS CLI（可修缺陷，不扩架构）
 - `data/`：本地运行数据；敏感配置与会话默认不提交
 

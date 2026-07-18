@@ -55,7 +55,7 @@
 
 | 区域 | 现状 | 判定 |
 | --- | --- | --- |
-| `automation_app_dianping/workflow.py` | 最小 `launch_app` + `screenshot` | 平台接入骨架，不是业务闭环 |
+| `automation_app_dianping/workflow.py` | smoke + publish 步骤声明 | 发布主路径已进入 Python workflow |
 | 视觉 helper | 公共 `CapabilityRequest` + 注入 executor | 已按契约净化 |
 | composition root | `automation_app_dianping/composition.py` | 已提供唯一装配入口 |
 | `src/` Bun/TS CLI | 真实抓取/生成/发布仍在这里 | 遗留主路径，冻结扩张 |
@@ -320,9 +320,10 @@ CI 期望：
 1. **契约净化**：完成公共 capability helper 迁移。
 2. **composition root**：完成唯一装配入口。
 3. **文档收敛**：README / 遗留说明已指向应用开发指南。
-4. **发布主路径迁移**：Python publish workflow 步骤与离线成功路径已落地；live selector 仍待真机校准。
-5. **遗留 TS 冻结执行**：`src/` 架构扩张已冻结。
-6. **版本与 CI 对齐**：app `0.2.0`、双 Python 离线 CI 已对齐；正式包源矩阵仍依赖 kit 发布进度。
+4. **发布主路径迁移**：Python publish workflow、草稿/清单/限额门禁已落地；live selector 真机校准仍 opt-in。
+5. **遗留 TS 冻结执行**：`src/` 架构扩张已冻结；业务知识已迁到 Python storage/services。
+6. **版本与 CI 对齐**：app `0.2.0`、双 Python 离线 CI 已对齐；正式包源矩阵见 `docs/platform-requests.md`。
+7. **底层提需**：已在 `docs/platform-requests.md` 记录 adapter/capability/发布矩阵缺口。
 
 ## 12. 完成定义
 
