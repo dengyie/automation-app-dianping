@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+env:
+  # Ordered fallbacks when automation-kit main lacks capability contracts (REQ-003).
+  AUTOMATION_KIT_CAPABILITY_FALLBACK_REFS: docs/unified-development-20260718
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,21 +26,43 @@ jobs:
         with:
           repository: dengyie/automation-kit
           path: automation-kit
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install automation-kit with capability support when available
+      - name: Install automation-kit with capability contracts
         run: |
-          if [ -d ../automation-kit/automation_core/capabilities ]; then
-            python -m pip install -e ../automation-kit
-          else
-            echo "Primary automation-kit checkout has no capability module; trying docs architecture branch."
-            git -C ../automation-kit fetch origin docs/unified-development-20260718 || true
-            if git -C ../automation-kit show-ref --verify --quiet refs/remotes/origin/docs/unified-development-20260718; then
-              git -C ../automation-kit checkout -B docs/unified-development-20260718 origin/docs/unified-development-20260718
+          set -euo pipefail
+          kit_root="../automation-kit"
+          ensure_capabilities() {
+            if [ -d "$kit_root/automation_core/capabilities" ]; then
+              echo "Using automation-kit checkout with capability module at $(git -C "$kit_root" rev-parse --short HEAD)."
+              return 0
             fi
-            python -m pip install -e ../automation-kit
-          fi
+            echo "Primary automation-kit checkout lacks automation_core.capabilities."
+            git -C "$kit_root" fetch origin --prune
+            IFS=' ' read -r -a refs <<< "${AUTOMATION_KIT_CAPABILITY_FALLBACK_REFS}"
+            for ref in "${refs[@]}"; do
+              [ -n "$ref" ] || continue
+              echo "Trying fallback ref: $ref"
+              if git -C "$kit_root" rev-parse --verify --quiet "origin/$ref" >/dev/null; then
+                git -C "$kit_root" checkout -B "ci-kit-$ref" "origin/$ref"
+              elif git -C "$kit_root" rev-parse --verify --quiet "$ref" >/dev/null; then
+                git -C "$kit_root" checkout -B "ci-kit-local" "$ref"
+              else
+                echo "Fallback ref not found: $ref"
+                continue
+              fi
+              if [ -d "$kit_root/automation_core/capabilities" ]; then
+                echo "Capability module found on $ref ($(git -C "$kit_root" rev-parse --short HEAD))."
+                return 0
+              fi
+            done
+            echo "::error::automation-kit capability contracts unavailable. Publish automation-kit with automation_core.capabilities (REQ-003) or set AUTOMATION_KIT_CAPABILITY_FALLBACK_REFS."
+            exit 1
+          }
+          ensure_capabilities
+          python -m pip install -e "$kit_root"
       - run: python -m pip install -e . --no-deps
       - run: python -m pip install "pytest>=8,<9" "pytest-cov>=5,<6"
       - run: python -m pytest -q
@@ -54,6 +80,7 @@ jobs:
         with:
           repository: dengyie/automation-kit
           path: automation-kit
+          fetch-depth: 0
       - uses: actions/checkout@v4
         with:
           repository: dengyie/slidex
@@ -63,12 +90,28 @@ jobs:
           python-version: "3.11"
       - name: Ensure capability platform baseline
         run: |
-          if [ ! -d ../automation-kit/automation_core/capabilities ]; then
-            git -C ../automation-kit fetch origin docs/unified-development-20260718 || true
-            if git -C ../automation-kit show-ref --verify --quiet refs/remotes/origin/docs/unified-development-20260718; then
-              git -C ../automation-kit checkout -B docs/unified-development-20260718 origin/docs/unified-development-20260718
-            fi
+          set -euo pipefail
+          kit_root="../automation-kit"
+          if [ -d "$kit_root/automation_core/capabilities" ]; then
+            echo "Capability module present on primary checkout."
+            exit 0
           fi
+          git -C "$kit_root" fetch origin --prune
+          IFS=' ' read -r -a refs <<< "${AUTOMATION_KIT_CAPABILITY_FALLBACK_REFS}"
+          for ref in "${refs[@]}"; do
+            [ -n "$ref" ] || continue
+            if git -C "$kit_root" rev-parse --verify --quiet "origin/$ref" >/dev/null; then
+              git -C "$kit_root" checkout -B "ci-kit-$ref" "origin/$ref"
+            else
+              continue
+            fi
+            if [ -d "$kit_root/automation_core/capabilities" ]; then
+              echo "Using fallback $ref for capability contracts."
+              exit 0
+            fi
+          done
+          echo "::error::No automation-kit ref provides automation_core.capabilities (REQ-003)."
+          exit 1
       - run: python -m pip install -e ../automation-kit
       - run: python -m pip install -e . --no-deps
       - run: python -m pip install -e ../slidex

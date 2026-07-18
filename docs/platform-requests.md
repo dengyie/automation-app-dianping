@@ -26,6 +26,11 @@
 - live 测试应证明：真机/模拟器可完成评分与照片选择
 - 兼容约束：不破坏现有 `tap/type_text/wait_for_element`
 
+## 应用侧过渡策略
+- 已声明 `WorkflowStep.action("rate", ...)` 与 `pick_photos`
+- 同时附带 `fallback_action` / `fallback_steps`（通用 tap），离线与未交付 adapter 可跑
+- 平台交付后删除 fallback 字段即可，无需改业务门禁
+
 ## REQ-002 visual.challenge Android 截图结果契约固化
 
 ## 背景
@@ -60,3 +65,8 @@
 
 ## 验收
 - 从正式包源安装后，本仓默认离线测试通过
+
+## 应用侧过渡策略（CI）
+- CI 通过 `AUTOMATION_KIT_CAPABILITY_FALLBACK_REFS` 有序回退到含 capability 的 kit 分支
+- 主线/正式包源含 `automation_core.capabilities` 后，应清空该 env 并只装正式版本
+- 回退失败时 CI 硬失败并指向 REQ-003，不再静默装无 capability 的 kit

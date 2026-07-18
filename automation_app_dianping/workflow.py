@@ -196,23 +196,46 @@ def build_publish_steps(options, selectors):
                 timeout=5.0,
             )
         )
+        # Prefer platform semantic action (REQ-001). Fallback keeps offline
+        # fake sessions working when adapter only knows tap/type primitives.
         for key, value in ratings.items():
             selector = selectors.rating_star(key, value)
-            if selector:
-                steps.append(WorkflowStep.action("tap", selector=selector))
-
-    if photos:
-        steps.append(WorkflowStep.action("tap", selector=selectors.add_photo))
-        for index, photo in enumerate(photos):
             steps.append(
                 WorkflowStep.action(
-                    "tap",
-                    selector=selectors.photo_thumbnail,
-                    photo_path=photo,
-                    photo_index=index,
+                    "rate",
+                    dimension=key,
+                    value=value,
+                    selector=selector,
+                    fallback_action="tap",
+                    fallback_selector=selector,
                 )
             )
-        steps.append(WorkflowStep.action("tap", selector=selectors.photo_confirm))
+
+    if photos:
+        steps.append(
+            WorkflowStep.action(
+                "pick_photos",
+                photos=list(photos),
+                add_selector=selectors.add_photo,
+                thumbnail_selector=selectors.photo_thumbnail,
+                confirm_selector=selectors.photo_confirm,
+                # Compatibility payload for adapters that only implement tap.
+                fallback_action="tap",
+                fallback_steps=[
+                    {"action": "tap", "selector": selectors.add_photo},
+                    *[
+                        {
+                            "action": "tap",
+                            "selector": selectors.photo_thumbnail,
+                            "photo_path": photo,
+                            "photo_index": index,
+                        }
+                        for index, photo in enumerate(photos)
+                    ],
+                    {"action": "tap", "selector": selectors.photo_confirm},
+                ],
+            )
+        )
 
     steps.extend(
         [

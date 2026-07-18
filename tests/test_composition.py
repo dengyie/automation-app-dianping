@@ -144,3 +144,62 @@ def test_build_composition_accepts_injected_executor_and_registers_slidex(monkey
     assert composition.capability_executor is sentinel
     assert composition.enable_slidex is True
     assert registry.providers and registry.providers[0].visual_solver == "solver"
+
+
+def test_build_composition_register_replace_type_error_path(monkeypatch):
+    class FakeRegistry:
+        def __init__(self):
+            self.calls = []
+
+        def register(self, provider, replace=False):
+            self.calls.append(replace)
+            if not replace:
+                raise TypeError("replace required")
+
+    class FakeProvider:
+        def __init__(self, visual_solver=None):
+            self.visual_solver = visual_solver
+
+    import types
+    import sys
+
+    fake_module = types.ModuleType("slidex.integrations.automation_kit")
+    fake_module.SlidexVisualCapability = FakeProvider
+    monkeypatch.setitem(sys.modules, "slidex", types.ModuleType("slidex"))
+    monkeypatch.setitem(sys.modules, "slidex.integrations", types.ModuleType("slidex.integrations"))
+    monkeypatch.setitem(sys.modules, "slidex.integrations.automation_kit", fake_module)
+
+    registry = FakeRegistry()
+    composition = build_composition(
+        enable_slidex=True,
+        capability_registry=registry,
+        capability_executor=object(),
+    )
+    assert composition.enable_slidex is True
+    assert registry.calls == [False, True]
+
+
+def test_build_composition_register_unexpected_error_is_not_swallowed(monkeypatch):
+    class FakeRegistry:
+        def register(self, provider, replace=False):
+            raise RuntimeError("registry broken")
+
+    class FakeProvider:
+        def __init__(self, visual_solver=None):
+            self.visual_solver = visual_solver
+
+    import types
+    import sys
+
+    fake_module = types.ModuleType("slidex.integrations.automation_kit")
+    fake_module.SlidexVisualCapability = FakeProvider
+    monkeypatch.setitem(sys.modules, "slidex", types.ModuleType("slidex"))
+    monkeypatch.setitem(sys.modules, "slidex.integrations", types.ModuleType("slidex.integrations"))
+    monkeypatch.setitem(sys.modules, "slidex.integrations.automation_kit", fake_module)
+
+    with pytest.raises(RuntimeError, match="registry broken"):
+        build_composition(
+            enable_slidex=True,
+            capability_registry=FakeRegistry(),
+            capability_executor=object(),
+        )

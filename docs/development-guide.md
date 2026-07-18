@@ -60,7 +60,7 @@
 | composition root | `automation_app_dianping/composition.py` | 已提供唯一装配入口 |
 | `src/` Bun/TS CLI | 抓取/生成等运营命令仍在此；发布门禁与清单已迁 Python | 遗留路径，架构冻结 |
 | `pyproject.toml` | `0.2.0` + 正式版本范围声明，开发态 path 可选 | 版本与契约对齐中 |
-| 默认测试 | 离线 36 passed / 1 skipped live | 达标 |
+| 默认测试 | 离线 pytest + coverage gate | 达标 |
 
 ### 3.2 目标状态
 
@@ -320,9 +320,9 @@ CI 期望：
 1. **契约净化**：完成公共 capability helper 迁移。
 2. **composition root**：完成唯一装配入口。
 3. **文档收敛**：README / 遗留说明已指向应用开发指南。
-4. **发布主路径迁移**：Python publish workflow、草稿/清单/限额门禁已落地；live selector 真机校准仍 opt-in。
+4. **发布主路径迁移**：Python publish workflow、草稿/清单/限额门禁已落地；publish 已声明 `rate`/`pick_photos` 语义动作并带 tap fallback（REQ-001）；live selector 真机校准仍 opt-in。
 5. **遗留 TS 冻结执行**：`src/` 架构扩张已冻结；业务知识已迁到 Python storage/services。
-6. **版本与 CI 对齐**：app `0.2.0`、双 Python 离线 CI 已对齐；正式包源矩阵见 `docs/platform-requests.md`。
+6. **版本与 CI 对齐**：app `0.2.0`、双 Python 离线 CI 已对齐；`[project]` 为发布真相源、Poetry path 仅本地；CI 用 `AUTOMATION_KIT_CAPABILITY_FALLBACK_REFS` 显式回退并在缺失时硬失败（REQ-003）。
 7. **底层提需**：已在 `docs/platform-requests.md` 记录 adapter/capability/发布矩阵缺口。
 
 ## 12. 完成定义

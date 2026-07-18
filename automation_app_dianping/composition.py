@@ -74,8 +74,7 @@ def build_composition(
         try:
             registry.register(provider)
         except TypeError:
-            registry.register(provider, replace=True)
-        except Exception:
+            # Some registry APIs require replace=True when re-registering.
             registry.register(provider, replace=True)
 
     if capability_executor is not None:

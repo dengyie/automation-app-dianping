@@ -157,8 +157,18 @@ def test_publish_workflow_declares_business_success_path():
     action_names = [action.message for action in result.actions]
     assert action_names[0] == "launch_app"
     assert "type_text" in action_names
-    assert "tap" in action_names
+    assert "rate" in action_names
+    assert "pick_photos" in action_names
     assert any(action.message == "wait_for_element" for action in result.actions)
+
+    rate_actions = [kwargs for name, kwargs in session.actions if name == "rate"]
+    assert any(item.get("dimension") == "taste" and item.get("value") == 5 for item in rate_actions)
+    assert all(item.get("fallback_action") == "tap" for item in rate_actions)
+
+    pick = next(kwargs for name, kwargs in session.actions if name == "pick_photos")
+    assert pick["photos"] == ["data/photos/mock-shop-001/dish1.jpg"]
+    assert pick["fallback_action"] == "tap"
+    assert isinstance(pick["fallback_steps"], list) and pick["fallback_steps"]
 
 
 def test_publish_steps_require_business_fields():
@@ -267,3 +277,31 @@ def test_string_param_type_errors_surface_in_mode_parsing():
             context=WorkflowContext(workflow_name="dianping-android", live=False),
             options=WorkflowOptions(parameters={"mode": 1}),
         )
+
+
+def test_build_publish_steps_prefer_semantic_actions():
+    content = "内容足够长用于构造步骤" * 20
+    steps = build_publish_steps(
+        WorkflowOptions(
+            parameters={
+                "mode": "publish",
+                "shop_name": "店",
+                "content": content,
+                "ratings": {"taste": 4, "environment": 3, "service": 4},
+                "photos": ["a.jpg", "b.jpg"],
+            }
+        ),
+        default_selectors(),
+    )
+    rate_steps = [step for step in steps if step.kind == "action" and step.name == "rate"]
+    pick_steps = [step for step in steps if step.kind == "action" and step.name == "pick_photos"]
+
+    assert len(rate_steps) == 3
+    assert {step.parameters["dimension"] for step in rate_steps} == {"taste", "environment", "service"}
+    assert all(step.parameters.get("fallback_action") == "tap" for step in rate_steps)
+
+    assert len(pick_steps) == 1
+    assert pick_steps[0].parameters["photos"] == ["a.jpg", "b.jpg"]
+    assert pick_steps[0].parameters["fallback_action"] == "tap"
+    assert isinstance(pick_steps[0].parameters["fallback_steps"], list)
+    assert pick_steps[0].parameters["fallback_steps"][0]["action"] == "tap"
