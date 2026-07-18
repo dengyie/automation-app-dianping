@@ -7,11 +7,70 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.11"]
+    defaults:
+      run:
+        working-directory: automation-app-dianping
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: automation-app-dianping
+      - uses: actions/checkout@v4
+        with:
+          repository: dengyie/automation-kit
+          path: automation-kit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install automation-kit with capability support when available
+        run: |
+          if [ -d ../automation-kit/automation_core/capabilities ]; then
+            python -m pip install -e ../automation-kit
+          else
+            echo "Primary automation-kit checkout has no capability module; trying docs architecture branch."
+            git -C ../automation-kit fetch origin docs/unified-development-20260718 || true
+            if git -C ../automation-kit show-ref --verify --quiet refs/remotes/origin/docs/unified-development-20260718; then
+              git -C ../automation-kit checkout -B docs/unified-development-20260718 origin/docs/unified-development-20260718
+            fi
+            python -m pip install -e ../automation-kit
+          fi
+      - run: python -m pip install -e . --no-deps
+      - run: python -m pip install "pytest>=8,<9" "pytest-cov>=5,<6"
+      - run: python -m pytest -q
+
+  slidex-contract:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: automation-app-dianping
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: automation-app-dianping
+      - uses: actions/checkout@v4
+        with:
+          repository: dengyie/automation-kit
+          path: automation-kit
+      - uses: actions/checkout@v4
+        with:
+          repository: dengyie/slidex
+          path: slidex
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - uses: abatilo/actions-poetry@v3
-      - run: poetry install
-      - run: poetry run pytest -q
+      - name: Ensure capability platform baseline
+        run: |
+          if [ ! -d ../automation-kit/automation_core/capabilities ]; then
+            git -C ../automation-kit fetch origin docs/unified-development-20260718 || true
+            if git -C ../automation-kit show-ref --verify --quiet refs/remotes/origin/docs/unified-development-20260718; then
+              git -C ../automation-kit checkout -B docs/unified-development-20260718 origin/docs/unified-development-20260718
+            fi
+          fi
+      - run: python -m pip install -e ../automation-kit
+      - run: python -m pip install -e . --no-deps
+      - run: python -m pip install -e ../slidex
+      - run: python -m pip install "pytest>=8,<9" "pytest-cov>=5,<6"
+      - run: python -m pytest -q

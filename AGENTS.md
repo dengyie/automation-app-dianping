@@ -1,3 +1,5 @@
+> 历史遗留说明：本文件不再维护架构真相。应用开发以 `docs/development-guide.md` 为准，平台契约以 `automation-kit/docs/development.md` 为准。`src/` 为遗留路径，只修缺陷，不扩架构。
+
 # 大众点评自动化评价工具
 
 TypeScript + Bun CLI 工具，支持两种发布方式：

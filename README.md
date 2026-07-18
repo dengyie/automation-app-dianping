@@ -1,22 +1,55 @@
-# 大众点评评价自动化工具
+# automation-app-dianping
 
-AI 驱动的大众点评评价生成与发布工具。
+大众点评业务应用仓。基于 `automation-kit` 公共契约做顶层应用开发，不实现底层运行时。
 
-本仓库统一承载原 `dianping` 项目的 TypeScript + Bun CLI，以及
-`automation_app_dianping` Python 工作流集成。旧仓库的源码和 Git 历史已合并到
-`automation-app-dianping`，后续开发与维护均在本仓库进行。
-
-应用开发基线见 [docs/development-guide.md](docs/development-guide.md)。平台架构与公共契约以 [automation-kit/docs/development.md](https://github.com/dengyie/automation-kit/blob/main/docs/development.md) 为准。
+- 应用开发基线：[docs/development-guide.md](docs/development-guide.md)
+- 平台架构与公共契约：[automation-kit/docs/development.md](https://github.com/dengyie/automation-kit/blob/main/docs/development.md)
 
 ## 项目组成
 
-- `src/`：大众点评抓取、评价生成、照片处理和 Appium 发布 CLI
-- `automation_app_dianping/`：基于 `automation_runner.workflows` 的 Python 工作流适配层
-- `tests/`：Python 工作流的离线测试
-- `data/`：本地运行数据；账号会话和个人配置默认不提交
+- `automation_app_dianping/`：Python 应用层（config / workflow / composition）
+- `tests/`：默认离线测试
+- `src/`：遗留 Bun/TS CLI（可修缺陷，不扩架构）
+- `data/`：本地运行数据；敏感配置与会话默认不提交
 
-Python 工作流需要 `automation-kit` 公共契约，默认离线测试不依赖浏览器、设备或网络。
-视觉能力通过公共 `visual.challenge` 契约请求；Slidex 仅作为可选 provider 在 composition root 装配。
+## 应用层用法
+
+```python
+from automation_runner import WorkflowContext, WorkflowOptions
+from automation_app_dianping.composition import build_composition, create_workflow_from_composition
+
+composition = build_composition(enable_slidex=False)
+workflow = create_workflow_from_composition(
+    composition,
+    session_factory=make_session,
+    context=WorkflowContext(workflow_name="dianping-android", live=False),
+    options=WorkflowOptions(app_id="com.dianping.v1", parameters={"mode": "smoke"}),
+)
+result = workflow.run()
+```
+
+视觉能力只通过公共契约请求：
+
+```python
+from automation_app_dianping.workflow import solve_android_screenshot_capability
+
+result = await solve_android_screenshot_capability(
+    capability_executor=composition.capability_executor,
+    screenshot_bytes=image_bytes,
+    run_id="run-1",
+    task_id="task-1",
+)
+```
+
+默认离线测试：
+
+```bash
+python -m pytest -q
+```
+
+## 遗留 TypeScript CLI
+
+`src/` 仍保留历史半自动抓取/生成/发布命令，用于迁移期运营。按开发指南，该路径冻结架构扩张，新业务逻辑进入 Python 应用层。
 
 ## 特性
 

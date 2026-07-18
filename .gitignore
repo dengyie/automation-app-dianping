@@ -20,3 +20,4 @@ data/shops.txt
 *.bak
 .playwright-mcp/
 package-lock.json
+*.egg-info/

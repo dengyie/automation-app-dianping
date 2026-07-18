@@ -1,1 +1,3 @@
-__version__ = "0.1.0"
+"""Dianping application package built on automation-kit."""
+
+__version__ = "0.2.0"

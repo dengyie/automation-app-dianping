@@ -1,3 +1,10 @@
+# Development Log (legacy, frozen)
+
+This file is frozen. Do not append new development status here.
+Use `docs/development-guide.md` for app development baseline and git history for past work.
+
+---
+
 # Development Log
 
 ## 2026-06-17: Phase 3 Dianping Application Consumer

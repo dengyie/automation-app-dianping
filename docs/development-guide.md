@@ -56,10 +56,10 @@
 | 区域 | 现状 | 判定 |
 | --- | --- | --- |
 | `automation_app_dianping/workflow.py` | 最小 `launch_app` + `screenshot` | 平台接入骨架，不是业务闭环 |
-| 视觉 helper | 仍直接依赖 Slidex 内部类型 / solver | **违规，优先净化** |
-| composition root | 不存在 | **缺失，优先补齐** |
+| 视觉 helper | 公共 `CapabilityRequest` + 注入 executor | 已按契约净化 |
+| composition root | `automation_app_dianping/composition.py` | 已提供唯一装配入口 |
 | `src/` Bun/TS CLI | 真实抓取/生成/发布仍在这里 | 遗留主路径，冻结扩张 |
-| `pyproject.toml` | `0.1.0` + path 依赖 | 开发态可用，非正式发布形态 |
+| `pyproject.toml` | `0.2.0` + 正式版本范围声明，开发态 path 可选 | 版本与契约对齐中 |
 | 默认测试 | 离线 Python 测试可跑 | 保留并加强 |
 
 ### 3.2 目标状态
@@ -317,12 +317,12 @@ CI 期望：
 
 只做应用仓事项，按顺序：
 
-1. **契约净化**：去掉 Slidex 内部 import，改为公共 capability helper。
-2. **composition root**：补唯一装配入口。
-3. **文档收敛**：README 只保留使用入口；遗留架构说明停止维护。
-4. **发布主路径迁移**：把 App 发布成功条件写入 Python workflow + 测试。
-5. **遗留 TS 冻结执行**：`src/` 只修缺陷。
-6. **版本与 CI 对齐**：app 版本、kit 消费范围、离线矩阵与正式依赖策略。
+1. **契约净化**：完成公共 capability helper 迁移。
+2. **composition root**：完成唯一装配入口。
+3. **文档收敛**：README / 遗留说明已指向应用开发指南。
+4. **发布主路径迁移**：Python publish workflow 步骤与离线成功路径已落地；live selector 仍待真机校准。
+5. **遗留 TS 冻结执行**：`src/` 架构扩张已冻结。
+6. **版本与 CI 对齐**：app `0.2.0`、双 Python 离线 CI 已对齐；正式包源矩阵仍依赖 kit 发布进度。
 
 ## 12. 完成定义
 
