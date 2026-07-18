@@ -6,6 +6,8 @@ AI 驱动的大众点评评价生成与发布工具。
 `automation_app_dianping` Python 工作流集成。旧仓库的源码和 Git 历史已合并到
 `automation-app-dianping`，后续开发与维护均在本仓库进行。
 
+应用开发基线见 [docs/development-guide.md](docs/development-guide.md)。平台架构与公共契约以 [automation-kit/docs/development.md](https://github.com/dengyie/automation-kit/blob/main/docs/development.md) 为准。
+
 ## 项目组成
 
 - `src/`：大众点评抓取、评价生成、照片处理和 Appium 发布 CLI
