@@ -7,7 +7,7 @@ readme = "README.md"
 requires-python = ">=3.8,<4.0"
 # Release / CI install surface: published version range only (no sibling path).
 dependencies = [
-    "automation-kit>=0.3.0,<0.4.0",
+    "automation-kit>=0.4.0,<0.5.0",
 ]
 
 [project.optional-dependencies]
