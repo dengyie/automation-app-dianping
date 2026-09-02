@@ -73,6 +73,9 @@ def create_appium_driver(device: DianpingDeviceConfig):
     options.new_command_timeout = device.new_command_timeout
     options.set_capability("autoGrantPermissions", device.auto_grant_permissions)
     options.set_capability("disableIdLocatorAutocompletion", True)
+    # ColorOS/OnePlus chained `settings put global hidden_api_policy*` adb
+    # calls exit 255; Appium aborts the session unless told to ignore it.
+    options.set_capability("ignoreHiddenApiPolicyError", True)
     if device.udid:
         options.udid = device.udid
     if device.platform_version:

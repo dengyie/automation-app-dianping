@@ -115,3 +115,30 @@ def test_confirm_search_and_dismiss(tmp_path):
     assert bad.success is False
     dumps = list(Path(tmp_path).glob("fail-*.png")) + list(Path(tmp_path).glob("fail-*.xml"))
     assert dumps
+
+
+def test_appium_driver_caps_include_coloros_workarounds():
+    pytest.importorskip("appium")
+    import appium.webdriver as appium_webdriver
+
+    from automation_app_dianping.config import DianpingDeviceConfig
+    from automation_app_dianping.session import create_appium_driver
+
+    captured = {}
+
+    class FakeRemote:
+        def __init__(self, command_executor, options):
+            captured["executor"] = command_executor
+            captured["capabilities"] = options.to_capabilities()
+
+    original_remote = appium_webdriver.Remote
+    appium_webdriver.Remote = FakeRemote
+    try:
+        create_appium_driver(DianpingDeviceConfig())
+    finally:
+        appium_webdriver.Remote = original_remote
+
+    caps = captured["capabilities"]
+    assert caps["appium:ignoreHiddenApiPolicyError"] is True
+    assert caps["appium:autoGrantPermissions"] is True
+    assert caps["appium:automationName"] == "UiAutomator2"
