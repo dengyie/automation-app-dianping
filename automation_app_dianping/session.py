@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
@@ -411,12 +412,170 @@ def build_session_factory(
     *,
     env: Optional[dict] = None,
     driver_factory: Optional[Callable[[], Any]] = None,
-) -> Callable[[], DianpingAppiumSession]:
+    driver: Optional[str] = None,
+) -> Callable[[], Any]:
     config = device_config_from_env(env, base=device)
+    source = env if env is not None else os.environ
+    selected = str(driver or source.get("DIANPING_DRIVER") or "appium").strip().lower()
+    if selected == "uia2":
+        return build_uia2_session_factory(config)
+    if selected != "appium":
+        raise ValueError("unsupported dianping driver: %s" % selected)
 
     def factory() -> DianpingAppiumSession:
         driver = driver_factory() if driver_factory is not None else create_appium_driver(config)
         identifier = config.udid or config.device_name or "dianping-device"
         return DianpingAppiumSession(driver=driver, identifier=str(identifier), artifact_root=Path(config.artifact_root))
+
+    return factory
+
+
+# --- uiautomator2 driver (no Appium server) --------------------------------
+
+_UIA2_UNSUPPORTED_TOKENS = ("instance(", "childSelector", "fromParent")
+
+# Single-method UiSelector constructs that map onto kit uia2 ``by`` keys.
+_UIA2_METHOD_MAP = {
+    "text": "text",
+    "textContains": "text-contains",
+    "description": "description",
+    "descriptionContains": "description-contains",
+    "resourceId": "id",
+    "className": "class",
+}
+
+_UIA2_METHOD_RE = re.compile(r'\.(\w+)\(\s*"([^"]*)"\s*\)')
+
+
+def translate_uiautomator_selector(selector: Any) -> Optional[Tuple[str, str]]:
+    """Translate a dianping locator string into a kit uia2 ``(by, value)`` pair.
+
+    Supported forms: ``id:<resource-id>``, ``~description``, ``xpath:...``,
+    bare ``//xpath``, plain text, and single-method UiSelector chains such as
+    ``uiautomator:new UiSelector().text("确定")``. Returns ``None`` for
+    constructs uiautomator2 cannot express (instance/childSelector/fromParent
+    or multi-method chains) so callers can skip the candidate; a missing
+    candidate is never an error because locator lists carry fallbacks.
+    """
+    if not isinstance(selector, str):
+        return None
+    text = selector.strip()
+    if not text:
+        return None
+    if text.startswith("id:"):
+        return ("id", text[3:].strip())
+    if text.startswith("~"):
+        return ("description", text[1:].strip())
+    if text.startswith("xpath:"):
+        return ("xpath", text[6:].strip())
+    if text.startswith("//"):
+        return ("xpath", text)
+    if text.startswith("uiautomator:"):
+        body = text[len("uiautomator:"):].strip()
+        if "new UiSelector()" not in body:
+            return None
+        if any(token in body for token in _UIA2_UNSUPPORTED_TOKENS):
+            return None
+        matches = _UIA2_METHOD_RE.findall(body)
+        if len(matches) != 1:
+            return None
+        method, argument = matches[0]
+        mapped = _UIA2_METHOD_MAP.get(method)
+        if mapped is None:
+            return None
+        return (mapped, argument)
+    return ("text", text)
+
+
+class DianpingUia2Session:
+    """uiautomator2-backed DriverSession for dianping workflows.
+
+    Delegates primitives and artifact capture to the kit ``adapters.uia2``
+    session (imported lazily at factory time, never at module import, so the
+    app stays importable without the kit adapter) and adds the dianping
+    business actions the smoke flow needs. Publish-flow parity on uia2
+    (multi-method UiSelector translation, rating/photo flows) is deferred.
+    """
+
+    def __init__(self, kit_session: Any):
+        self._session = kit_session
+        self.info = kit_session.info
+
+    def start(self) -> None:
+        self._session.start()
+
+    def stop(self) -> None:
+        self._session.stop()
+
+    def capture_artifact(self, artifact_type: str, name: str) -> ArtifactHandle:
+        return self._session.capture_artifact(artifact_type, name)
+
+    def execute_action(self, action_name: str, **kwargs: Any) -> ActionResult:
+        if action_name == "launch_app":
+            result = self._session.execute_action("launch_app", **kwargs)
+            if result.success:
+                time.sleep(float(kwargs.get("settle_seconds", 2.0)))
+            return result
+        if action_name == "dismiss_dialogs":
+            return self._dismiss_dialogs(**kwargs)
+        return self._session.execute_action(action_name, **kwargs)
+
+    def _dismiss_dialogs(self, **kwargs: Any) -> ActionResult:
+        selector = kwargs.get("selector")
+        max_attempts = int(kwargs.get("max_attempts", 3) or 3)
+        candidates = []
+        for candidate in as_selector_list(selector) if selector is not None else []:
+            translated = translate_uiautomator_selector(candidate)
+            if translated is not None:
+                candidates.append(translated)
+        dismissed = 0
+        for _ in range(max(max_attempts, 1)):
+            hit = False
+            for by, value in candidates:
+                result = self._session.execute_action("tap", selector=value, by=by)
+                if result.success:
+                    dismissed += 1
+                    hit = True
+                    break
+            if not hit:
+                break
+        # Best-effort hygiene, mirroring the Appium session: success even
+        # when no dialog was present.
+        return ActionResult(True, "dismiss_dialogs", data={"dismissed": dismissed})
+
+
+def _import_kit_uia2_session():
+    from adapters.uia2 import Uia2Session
+
+    return Uia2Session
+
+
+def _connect_uia2(udid: Optional[str]):
+    try:
+        import uiautomator2 as u2
+    except ImportError as exc:
+        raise ImportError(
+            "uiautomator2 is required for the dianping uia2 driver; "
+            "pip install 'uiautomator2>=3,<4'"
+        ) from exc
+    return u2.connect(udid)
+
+
+def build_uia2_session_factory(
+    config: DianpingDeviceConfig,
+) -> Callable[[], DianpingUia2Session]:
+    """Zero-arg factory connecting over adb directly (no Appium server)."""
+
+    def factory() -> DianpingUia2Session:
+        kit_session_cls = _import_kit_uia2_session()
+        device = _connect_uia2(config.udid)
+        identifier = str(config.udid or config.device_name or "dianping-uia2")
+        return DianpingUia2Session(
+            kit_session_cls(
+                device,
+                identifier=identifier,
+                artifact_root=Path(config.artifact_root),
+            ),
+        )
 
     return factory

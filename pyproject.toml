@@ -18,6 +18,8 @@ dev = [
 live = [
     "Appium-Python-Client>=4.0.0",
     "selenium>=4.0.0",
+    "uiautomator2>=3,<4",
+    "adbutils>=2.9.1",
 ]
 
 # Local Poetry path dependency is developer convenience only.

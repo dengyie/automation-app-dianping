@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     live = sub.add_parser("live", help="Authorized live device run")
     live.add_argument("--mode", choices=["smoke", "publish"], default="smoke")
+    live.add_argument(
+        "--driver",
+        choices=["appium", "uia2"],
+        default=None,
+        help="session driver; uia2 connects over adb without an Appium server",
+    )
     live.add_argument("--draft-id", default=None)
     live.add_argument("--shop-name", default=None)
     live.add_argument("--content", default=None)
@@ -58,6 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _apply_live_env(args, env: dict) -> dict:
     updated = dict(env)
+    if getattr(args, "driver", None):
+        updated["DIANPING_DRIVER"] = args.driver
     if args.udid:
         updated["DIANPING_DEVICE_UDID"] = args.udid
         updated["DIANPING_DEVICE_NAME"] = args.udid
