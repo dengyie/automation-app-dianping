@@ -24,6 +24,17 @@ def require_live_enabled(env: Optional[dict] = None) -> None:
         )
 
 
+def reject_uia2_publish(env: Optional[dict] = None) -> None:
+    """Publish parity on uia2 is deferred; fail fast instead of mid-flow."""
+    source = env if env is not None else os.environ
+    driver = str(source.get("DIANPING_DRIVER") or "appium").strip().lower()
+    if driver == "uia2":
+        raise ValueError(
+            "publish is not supported with the uia2 driver yet; "
+            "use --driver appium for publish runs"
+        )
+
+
 def resolve_session_factory(
     *,
     session_factory: Optional[Callable[[], Any]] = None,
@@ -80,6 +91,7 @@ def build_live_workflow(
     env: Optional[dict] = None,
 ):
     require_live_enabled(env)
+    reject_uia2_publish(env)
     from automation_runner import WorkflowContext, WorkflowOptions
     from automation_app_dianping.composition import (
         build_composition,

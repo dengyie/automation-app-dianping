@@ -514,7 +514,10 @@ class DianpingUia2Session:
         if action_name == "launch_app":
             result = self._session.execute_action("launch_app", **kwargs)
             if result.success:
-                time.sleep(float(kwargs.get("settle_seconds", 2.0)))
+                try:
+                    time.sleep(float(kwargs.get("settle_seconds", 2.0)))
+                except (TypeError, ValueError):
+                    return ActionResult(False, "settle_seconds must be a number")
             return result
         if action_name == "dismiss_dialogs":
             return self._dismiss_dialogs(**kwargs)

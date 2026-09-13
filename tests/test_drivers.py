@@ -145,6 +145,57 @@ def test_build_session_factory_rejects_unknown_driver():
         build_session_factory(env={"DIANPING_DRIVER": "adb"})
 
 
+def test_build_session_factory_driver_arg_beats_env():
+    factory = build_session_factory(
+        env={"DIANPING_DRIVER": "uia2"},
+        driver_factory=lambda: object(),
+        driver="appium",
+    )
+
+    assert isinstance(factory(), DianpingAppiumSession)
+
+
+def test_uia2_launch_app_rejects_non_numeric_settle(monkeypatch):
+    import automation_app_dianping.session as session_module
+
+    monkeypatch.setattr(session_module, "_import_kit_uia2_session", lambda: FakeKitSession)
+    monkeypatch.setattr(session_module, "_connect_uia2", lambda udid: FakeU2Device())
+
+    session = session_module.build_uia2_session_factory(DianpingDeviceConfig())()
+
+    result = session.execute_action("launch_app", app_id="com.dianping.v1", settle_seconds="soon")
+
+    assert result.success is False
+    assert "settle_seconds must be a number" in result.message
+
+
+def test_build_live_workflow_rejects_uia2_publish(monkeypatch):
+    from automation_app_dianping.live import build_live_workflow
+
+    monkeypatch.setenv("DIANPING_LIVE_E2E", "1")
+    monkeypatch.setenv("DIANPING_DRIVER", "uia2")
+
+    with pytest.raises(ValueError, match="publish is not supported with the uia2 driver"):
+        build_live_workflow(
+            session_factory=lambda: object(),
+            shop_name="店铺",
+            content="内容",
+        )
+
+
+def test_build_live_workflow_smoke_allows_uia2(monkeypatch):
+    from automation_app_dianping.live import build_live_smoke_workflow
+
+    monkeypatch.setenv("DIANPING_LIVE_E2E", "1")
+    monkeypatch.setenv("DIANPING_DRIVER", "uia2")
+
+    workflow = build_live_smoke_workflow(
+        session_factory=lambda: object(),
+    )
+
+    assert workflow.name == "dianping-smoke"
+
+
 def test_uia2_factory_missing_kit_adapter_raises_import_error(monkeypatch):
     import automation_app_dianping.session as session_module
 
