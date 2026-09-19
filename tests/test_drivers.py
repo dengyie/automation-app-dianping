@@ -223,18 +223,20 @@ def test_uia2_launch_app_rejects_non_numeric_settle(monkeypatch):
     assert "settle_seconds must be a number" in result.message
 
 
-def test_build_live_workflow_rejects_uia2_publish(monkeypatch):
+def test_build_live_workflow_allows_uia2_publish(monkeypatch):
+    """uia2 publish parity landed (2026-09-20); the former guard is retired."""
     from automation_app_dianping.live import build_live_workflow
 
     monkeypatch.setenv("DIANPING_LIVE_E2E", "1")
     monkeypatch.setenv("DIANPING_DRIVER", "uia2")
 
-    with pytest.raises(ValueError, match="publish is not supported with the uia2 driver"):
-        build_live_workflow(
-            session_factory=lambda: object(),
-            shop_name="店铺",
-            content="内容",
-        )
+    workflow = build_live_workflow(
+        session_factory=lambda: object(),
+        shop_name="店铺",
+        content="内容",
+    )
+
+    assert workflow is not None
 
 
 def test_build_live_workflow_smoke_allows_uia2(monkeypatch):
@@ -382,3 +384,108 @@ def test_uia2_smoke_flow_runs_green_offline(tmp_path, monkeypatch):
         if step.artifact_result
     }
     assert {"screenshot", "page_source"} <= artifact_types
+
+
+# --- uia2 publish parity ------------------------------------------------------
+
+
+class FakeKitUia2:
+    """Records translated kit calls; publishes label bounds for rate."""
+
+    def __init__(self):
+        self.calls = []
+        self.info = SessionInfo(driver_name="uia2", platform="android", identifier="fake")
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def execute_action(self, action_name, **kwargs):
+        self.calls.append((action_name, kwargs))
+        if action_name == "element_bounds":
+            return ActionResult(
+                True, "element_bounds", data={"x": 68, "y": 632, "width": 72, "height": 42}
+            )
+        return ActionResult(True, action_name)
+
+    def capture_artifact(self, artifact_type, name):
+        return ArtifactHandle(artifact_type=artifact_type, path=Path(name))
+
+
+def _make_uia2_session(monkeypatch, kit=None):
+    import automation_app_dianping.session as session_module
+
+    kit = kit or FakeKitUia2()
+    monkeypatch.setattr(session_module, "_import_kit_uia2_session", lambda: type("C", (), {"__call__": lambda self, *a, **k: kit}))
+    return session_module.DianpingUia2Session(kit, captcha_window_seconds=0), kit
+
+
+def test_uia2_confirm_search_translates_then_taps(monkeypatch):
+    session, kit = _make_uia2_session(monkeypatch)
+
+    result = session.execute_action(
+        "confirm_search", selector=('uiautomator:new UiSelector().text("搜索")',), keycode=66
+    )
+
+    assert result.success
+    assert kit.calls[0] == ("tap", {"selector": "搜索", "by": "text"})
+
+
+def test_uia2_rate_uses_label_anchor_geometry(monkeypatch):
+    session, kit = _make_uia2_session(monkeypatch)
+
+    result = session.execute_action(
+        "rate",
+        dimension="taste",
+        value=5,
+        selector=('uiautomator:new UiSelector().text("口味")',),
+        anchor="dimension_row",
+    )
+
+    assert result.success
+    bounds_call, rate_swipe = kit.calls[0], kit.calls[-1]
+    assert bounds_call[0] == "element_bounds"
+    assert rate_swipe[0] == "swipe"
+    # x = 188 + 143.5*4 + 0.85*89 = 837; y = label center = 632+21 = 653.
+    assert rate_swipe[1]["start_x"] == 837 and rate_swipe[1]["start_y"] == 653
+
+
+def test_uia2_rate_requires_label_anchor(monkeypatch):
+    session, _ = _make_uia2_session(monkeypatch)
+
+    result = session.execute_action("rate", dimension="taste", value=5)
+
+    assert not result.success
+    assert "label anchor" in result.message
+
+
+def test_uia2_manual_window_prints_guidance(monkeypatch, capsys):
+    import automation_app_dianping.session as session_module
+
+    class BlockedKit(FakeKitUia2):
+        def execute_action(self, action_name, **kwargs):
+            self.calls.append((action_name, kwargs))
+            return ActionResult(False, "blocked")
+
+    kit = BlockedKit()
+    session = session_module.DianpingUia2Session(kit, captcha_window_seconds=2)
+
+    result = session.execute_action("tap", selector="搜索", by="text")
+
+    assert not result.success
+    out = capsys.readouterr().out
+    assert "solve the challenge" in out
+
+
+def test_uia2_execute_action_logs_progress(monkeypatch, capsys):
+    session, _ = _make_uia2_session(monkeypatch)
+
+    session.execute_action("tap", selector="搜索", by="text")
+
+    out = capsys.readouterr().out
+    assert "[dianping-uia2] >> tap" in out
+    assert "[dianping-uia2] << tap: ok" in out

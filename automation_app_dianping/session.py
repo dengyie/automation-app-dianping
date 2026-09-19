@@ -232,6 +232,17 @@ class DianpingAppiumSession:
             pass
 
     def execute_action(self, action_name: str, **kwargs: Any) -> ActionResult:
+        started = time.time()
+        print("[dianping] >> %s" % action_name, flush=True)
+        result = self._run_action(action_name, kwargs)
+        print(
+            "[dianping] << %s: %s (%.1fs)"
+            % (action_name, "ok" if result.success else "FAIL", time.time() - started),
+            flush=True,
+        )
+        return result
+
+    def _run_action(self, action_name: str, kwargs: Dict[str, Any]) -> ActionResult:
         if action_name == "rate":
             result = self._rate(**kwargs)
         elif action_name == "pick_photos":
@@ -259,6 +270,7 @@ class DianpingAppiumSession:
         ):
             result = self._retry_after_manual_window(action_name, kwargs, result)
         if not result.success:
+            print("[dianping] failure detail: %s" % result.message[:400], flush=True)
             self._dump_failure(action_name)
         return result
 
@@ -800,13 +812,15 @@ class DianpingUia2Session:
     Delegates primitives and artifact capture to the kit ``adapters.uia2``
     session (imported lazily at factory time, never at module import, so the
     app stays importable without the kit adapter) and adds the dianping
-    business actions the smoke flow needs. Publish-flow parity on uia2
-    (multi-method UiSelector translation, rating/photo flows) is deferred.
+    business actions: dialogs, search confirmation, and label-anchored
+    rating (the 2026-09 editor exposes no stable star ids).
     """
 
-    def __init__(self, kit_session: Any):
+    def __init__(self, kit_session: Any, *, captcha_window_seconds: float = 0.0):
         self._session = kit_session
         self.info = kit_session.info
+        self.captcha_window_seconds = float(captcha_window_seconds)
+        self._manual_window_active = False
 
     def start(self) -> None:
         self._session.start()
@@ -818,6 +832,19 @@ class DianpingUia2Session:
         return self._session.capture_artifact(artifact_type, name)
 
     def execute_action(self, action_name: str, **kwargs: Any) -> ActionResult:
+        started = time.time()
+        print("[dianping-uia2] >> %s" % action_name, flush=True)
+        result = self._run_action(action_name, kwargs)
+        print(
+            "[dianping-uia2] << %s: %s (%.1fs)"
+            % (action_name, "ok" if result.success else "FAIL", time.time() - started),
+            flush=True,
+        )
+        if not result.success:
+            print("[dianping-uia2] failure detail: %s" % result.message[:400], flush=True)
+        return result
+
+    def _run_action(self, action_name: str, kwargs: Dict[str, Any]) -> ActionResult:
         if action_name == "launch_app":
             result = self._session.execute_action("launch_app", **kwargs)
             if result.success:
@@ -828,7 +855,163 @@ class DianpingUia2Session:
             return result
         if action_name == "dismiss_dialogs":
             return self._dismiss_dialogs(**kwargs)
-        return self._session.execute_action(action_name, **kwargs)
+        if action_name == "confirm_search":
+            return self._confirm_search(**kwargs)
+        if action_name == "rate":
+            return self._rate(**kwargs)
+        if action_name == "element_bounds":
+            return self._element_bounds(**kwargs)
+        result = self._session.execute_action(action_name, **kwargs)
+        if (
+            not result.success
+            and action_name in {"tap", "type_text", "wait_for_element"}
+            and self.captcha_window_seconds > 0
+            and not self._manual_window_active
+        ):
+            result = self._retry_after_manual_window(action_name, kwargs, result)
+        return result
+
+    def _confirm_search(self, **kwargs: Any) -> ActionResult:
+        selector = kwargs.get("selector")
+        for candidate in as_selector_list(selector) if selector is not None else []:
+            translated = translate_uiautomator_selector(candidate)
+            if translated is None:
+                continue
+            by, value = translated
+            result = self._session.execute_action("tap", selector=value, by=by)
+            if result.success:
+                return result
+        # ENTER fallback: the kit uia2 adapter passes unknown actions to the
+        # uiautomator2 device, which exposes press_key.
+        press = getattr(self._session.driver, "press_key", None)
+        if callable(press):
+            keycode = kwargs.get("keycode")
+            if isinstance(keycode, bool) or not isinstance(keycode, (int, float)):
+                return ActionResult(False, "confirm_search keycode must be numeric")
+            press_result = self._session.execute_action("press_key", int(keycode))
+            if press_result.success:
+                return ActionResult(True, "confirm_search via keycode")
+        return ActionResult(False, "confirm_search failed for all selectors")
+
+    def _rate(self, **kwargs: Any) -> ActionResult:
+        anchor = kwargs.get("anchor")
+        if anchor not in {"overall", "dimension_row"}:
+            return ActionResult(False, "uia2 rate requires a label anchor")
+        selector = kwargs.get("selector")
+        candidates = as_selector_list(selector) if selector is not None else []
+        label_rect = None
+        for candidate in candidates:
+            translated = translate_uiautomator_selector(candidate)
+            if translated is None:
+                continue
+            by, value = translated
+            result = self._session.execute_action(
+                "element_bounds", selector=value, by=by
+            )
+            if result.success and isinstance(result.data, dict):
+                label_rect = result.data
+                break
+        if label_rect is None:
+            return ActionResult(False, "rate anchor label not found on uia2")
+        from automation_app_dianping.config import default_selectors
+
+        try:
+            numeric_value = int(kwargs.get("value"))
+        except (TypeError, ValueError):
+            return ActionResult(False, "rate requires a numeric value")
+        if not 1 <= numeric_value <= 5:
+            return ActionResult(False, "rating value must be 1-5")
+        selectors = default_selectors()
+        if anchor == "overall":
+            x = (
+                selectors.rating_overall_star_origin_px
+                + selectors.rating_overall_star_pitch_px * (numeric_value - 1)
+                + selectors.rating_star_tap_fraction * selectors.rating_star_width_px
+            )
+            y = label_rect["y"] + label_rect["height"] + selectors.rating_overall_star_gap_px
+        else:
+            x = (
+                selectors.rating_dim_star_origin_px
+                + selectors.rating_dim_star_pitch_px * (numeric_value - 1)
+                + selectors.rating_star_tap_fraction * selectors.rating_star_width_px
+            )
+            y = label_rect["y"] + label_rect["height"] / 2
+        try:
+            result = self._session.execute_action(
+                "swipe",
+                start_x=int(x),
+                start_y=int(y),
+                end_x=int(x),
+                end_y=int(y),
+                duration=0.08,
+            )
+        except Exception as exc:
+            return ActionResult(False, "uia2 rate swipe failed: %s" % exc)
+        if not result.success:
+            return result
+        if anchor == "overall":
+            self._resolve_half_star_popup(numeric_value)
+        return ActionResult(True, "uia2 star tapped at (%d, %d)" % (int(x), int(y)))
+
+    def _resolve_half_star_popup(self, value: int) -> None:
+        """Pick the exact integer if the tap split a star (best effort)."""
+        try:
+            by, popup_value = translate_uiautomator_selector(
+                'uiautomator:new UiSelector().text("%s星")' % value
+            )
+            self._session.execute_action(
+                "tap", selector=popup_value, by=by
+            )
+        except Exception:
+            pass
+
+    def _element_bounds(self, **kwargs: Any) -> ActionResult:
+        selector = kwargs.get("selector")
+        for candidate in as_selector_list(selector) if selector is not None else []:
+            translated = translate_uiautomator_selector(candidate)
+            if translated is None:
+                continue
+            by, value = translated
+            result = self._session.execute_action(
+                "element_bounds", selector=value, by=by
+            )
+            if result.success:
+                return result
+        return ActionResult(False, "element_bounds failed for all selectors")
+
+    def _retry_after_manual_window(
+        self, action_name: str, kwargs: Dict[str, Any], failure: ActionResult
+    ) -> ActionResult:
+        """Keep re-attempting a blocked action while a human clears a
+        risk-control challenge that the accessibility tree cannot see."""
+        print(
+            "[dianping] action %s blocked; solve the challenge on the device, "
+            "retrying for %.0fs..." % (action_name, self.captcha_window_seconds),
+            flush=True,
+        )
+        self._manual_window_active = True
+        try:
+            deadline = time.time() + self.captcha_window_seconds
+            attempt = 0
+            while time.time() < deadline:
+                time.sleep(min(5.0, max(1.0, deadline - time.time())))
+                attempt += 1
+                retry = self._session.execute_action(action_name, **kwargs)
+                if retry.success:
+                    print(
+                        "[dianping] action %s recovered after manual window "
+                        "(attempt %d)" % (action_name, attempt),
+                        flush=True,
+                    )
+                    return ActionResult(
+                        True,
+                        "%s (recovered after manual captcha window)" % action_name,
+                        data=retry.data,
+                    )
+            print("[dianping] manual window expired for %s" % action_name, flush=True)
+            return failure
+        finally:
+            self._manual_window_active = False
 
     def _dismiss_dialogs(self, **kwargs: Any) -> ActionResult:
         selector = kwargs.get("selector")
@@ -886,6 +1069,7 @@ def build_uia2_session_factory(
                 identifier=identifier,
                 artifact_root=Path(config.artifact_root),
             ),
+            captcha_window_seconds=config.captcha_window_seconds,
         )
 
     return factory

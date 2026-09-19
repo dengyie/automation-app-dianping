@@ -25,14 +25,9 @@ def require_live_enabled(env: Optional[dict] = None) -> None:
 
 
 def reject_uia2_publish(env: Optional[dict] = None) -> None:
-    """Publish parity on uia2 is deferred; fail fast instead of mid-flow."""
-    source = env if env is not None else os.environ
-    driver = str(source.get("DIANPING_DRIVER") or "appium").strip().lower()
-    if driver == "uia2":
-        raise ValueError(
-            "publish is not supported with the uia2 driver yet; "
-            "use --driver appium for publish runs"
-        )
+    """Publish parity on uia2 landed (dialogs, search, label-anchored
+    rating); the guard is retired. Kept as a no-op call site so older
+    tooling referencing it does not break."""
 
 
 def resolve_session_factory(
