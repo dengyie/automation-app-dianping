@@ -218,6 +218,13 @@ def build_publish_steps(options, selectors):
             timeout=10.0,
         ),
         WorkflowStep.action("tap", selector=selectors.search_bar),
+        # The search page inflates asynchronously; type_text immediately
+        # after the tap races past the input. Wait for it declaratively.
+        WorkflowStep.action(
+            "wait_for_element",
+            selector=selectors.search_input,
+            timeout=8.0,
+        ),
         WorkflowStep.action(
             "type_text",
             selector=selectors.search_input,

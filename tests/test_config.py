@@ -82,3 +82,23 @@ def test_search_bar_prefers_current_version_title_bar():
     assert "~搜索" in selectors.search_bar
     # Legacy id stays as fallback for older app versions.
     assert "id:com.dianping.v1:id/search_bar" in selectors.search_bar
+
+
+def test_search_input_prefers_search_page_edit_id():
+    """2026-09 real device: the search page input id is search_keyword_edit."""
+    from automation_app_dianping.config import DianpingSelectors
+
+    selectors = DianpingSelectors()
+
+    assert selectors.search_input[0] == "id:com.dianping.v1:id/search_keyword_edit"
+    assert len(selectors.search_input) == 2
+
+
+def test_search_input_prefers_search_page_edit_id():
+    """2026-09 real device: the search page input id is search_keyword_edit."""
+    from automation_app_dianping.config import DianpingSelectors
+
+    selectors = DianpingSelectors()
+
+    assert selectors.search_input[0] == "id:com.dianping.v1:id/search_keyword_edit"
+    assert len(selectors.search_input) == 2

@@ -22,6 +22,9 @@ class DianpingSelectors:
         'uiautomator:new UiSelector().resourceId("com.dianping.v1:id/search_bar")',
     )
     search_input: SelectorValue = (
+        # 2026-09 real device: the search page input is search_keyword_edit;
+        # a generic EditText stays as fallback for other versions/pages.
+        "id:com.dianping.v1:id/search_keyword_edit",
         'uiautomator:new UiSelector().className("android.widget.EditText")',
     )
     search_confirm: SelectorValue = (
