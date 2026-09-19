@@ -385,3 +385,17 @@ def test_smoke_steps_include_dismiss_and_page_source():
     assert ("artifact", "page_source") in names or any(
         s.kind == "artifact" and s.name == "page_source" for s in steps
     )
+
+
+def test_shop_result_selector_prefers_paren_suffixed_match():
+    """2026-09 real device: the results header echoes the raw search term and
+    real entries render as 名字(分店); the paren variant must be tried first."""
+    from automation_app_dianping.config import default_selectors
+    from automation_app_dianping.workflow import _shop_result_selector
+
+    candidates = _shop_result_selector(default_selectors(), "细记港九宵夜大牌档")
+
+    first = candidates[0] if isinstance(candidates, (list, tuple)) else candidates
+    assert "细记港九宵夜大牌档(" in first
+    second = candidates[1] if isinstance(candidates, (list, tuple)) and len(candidates) > 1 else None
+    assert second is not None and "细记港九宵夜大牌档(" not in second

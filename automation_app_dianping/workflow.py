@@ -166,6 +166,14 @@ def _shop_result_selector(selectors, shop_name):
     shop_name_selector = getattr(selectors, "shop_name_selector", None)
     if callable(shop_name_selector):
         try:
+            # The results page header echoes the raw search term, and review
+            # quotes can mention the shop; real entries render as
+            # "名字(分店)" with a halfwidth paren, so the paren-suffixed
+            # match is tried first to skip the header and quote rows.
+            candidates.append(shop_name_selector("%s(" % shop_name.strip()))
+        except Exception:
+            pass
+        try:
             candidates.append(shop_name_selector(shop_name))
         except Exception:
             pass
@@ -235,6 +243,17 @@ def build_publish_steps(options, selectors):
             "confirm_search",
             selector=getattr(selectors, "search_confirm", ("~搜索",)),
             keycode=66,
+        ),
+        # The suggestion page rows also contain the shop name; gate on a
+        # results-page marker before matching shop entries.
+        WorkflowStep.action(
+            "wait_for_element",
+            selector=getattr(
+                selectors,
+                "search_results_marker",
+                ('uiautomator:new UiSelector().text("商户")',),
+            ),
+            timeout=12.0,
         ),
         WorkflowStep.action(
             "wait_for_element",

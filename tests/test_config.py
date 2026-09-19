@@ -111,3 +111,14 @@ def test_device_activity_is_current_launcher():
 
     assert DianpingDeviceConfig.activity == "com.dianping.v1.NovaMainActivity"
     assert DianpingAppConfig.activity == "com.dianping.v1.NovaMainActivity"
+
+
+def test_search_confirm_prefers_results_button_and_marker_exists():
+    """2026-09 real device: the suggestion page button is search_button and
+    the results page exposes SearchPagerViewPager/商户 markers."""
+    from automation_app_dianping.config import DianpingSelectors
+
+    selectors = DianpingSelectors()
+
+    assert selectors.search_confirm[0] == "id:com.dianping.v1:id/search_button"
+    assert any("SearchPagerViewPager" in c for c in selectors.search_results_marker)

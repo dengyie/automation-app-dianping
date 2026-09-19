@@ -82,6 +82,13 @@ def create_appium_driver(device: DianpingDeviceConfig):
     # ColorOS/OnePlus chained `settings put global hidden_api_policy*` adb
     # calls exit 255; Appium aborts the session unless told to ignore it.
     options.set_capability("ignoreHiddenApiPolicyError", True)
+    # Dianping's search results / shop pages are WebView-heavy and keep the
+    # UI thread busy; without this the uiautomator2 server waits for idle
+    # until the 240s proxy timeout instead of returning promptly.
+    options.set_capability(
+        "settings",
+        {"waitForIdleTimeout": 0, "snapshotMaxDepth": 60},
+    )
     if device.udid:
         options.udid = device.udid
     if device.platform_version:

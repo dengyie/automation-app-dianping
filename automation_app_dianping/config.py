@@ -28,10 +28,21 @@ class DianpingSelectors:
         'uiautomator:new UiSelector().className("android.widget.EditText")',
     )
     search_confirm: SelectorValue = (
+        # 2026-09 real device: the suggestion page's orange button is
+        # search_button; description/text candidates trail for other pages.
+        "id:com.dianping.v1:id/search_button",
         "~搜索",
         'uiautomator:new UiSelector().text("搜索")',
         'uiautomator:new UiSelector().description("搜索")',
         'uiautomator:new UiSelector().textContains("搜索")',
+    )
+    # The results page exposes tab/desc markers the suggestion page lacks;
+    # wait for one before matching shop entries (a suggestion row also
+    # contains the shop name text).
+    search_results_marker: SelectorValue = (
+        'uiautomator:new UiSelector().description("SearchPagerViewPager")',
+        'uiautomator:new UiSelector().text("商户")',
+        'uiautomator:new UiSelector().descriptionContains("SearchPager")',
     )
     shop_result: SelectorValue = (
         'uiautomator:new UiSelector().className("android.widget.RelativeLayout").descriptionContains("店铺")',
