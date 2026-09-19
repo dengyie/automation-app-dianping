@@ -862,8 +862,9 @@ class DianpingUia2Session:
         if action_name == "element_bounds":
             return self._element_bounds(**kwargs)
         if action_name in {"tap", "type_text", "wait_for_element"}:
-            return self._with_translated_candidates(action_name, kwargs)
-        result = self._session.execute_action(action_name, **kwargs)
+            result = self._with_translated_candidates(action_name, kwargs)
+        else:
+            result = self._session.execute_action(action_name, **kwargs)
         if (
             not result.success
             and action_name in {"tap", "type_text", "wait_for_element"}
@@ -1030,7 +1031,10 @@ class DianpingUia2Session:
             while time.time() < deadline:
                 time.sleep(min(5.0, max(1.0, deadline - time.time())))
                 attempt += 1
-                retry = self._session.execute_action(action_name, **kwargs)
+                if action_name in {"tap", "type_text", "wait_for_element"}:
+                    retry = self._with_translated_candidates(action_name, kwargs)
+                else:
+                    retry = self._session.execute_action(action_name, **kwargs)
                 if retry.success:
                     print(
                         "[dianping] action %s recovered after manual window "
