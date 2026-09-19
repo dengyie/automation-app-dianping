@@ -21,3 +21,4 @@ data/shops.txt
 .playwright-mcp/
 package-lock.json
 *.egg-info/
+artifacts/
