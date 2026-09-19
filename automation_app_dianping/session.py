@@ -81,7 +81,11 @@ def create_appium_driver(device: DianpingDeviceConfig):
         options.udid = device.udid
     if device.platform_version:
         options.platform_version = device.platform_version
-    server_url = "http://%s:%s%s" % (device.host, device.port, device.path or "/")
+    # Selenium joins the base URL and the "/session" route by plain string
+    # concatenation, so a trailing slash in the configured base path would
+    # produce "//session" and 404 on Appium's router.
+    base_path = (device.path or "").rstrip("/")
+    server_url = "http://%s:%s%s" % (device.host, device.port, base_path)
     return appium_webdriver.Remote(command_executor=server_url, options=options)
 
 

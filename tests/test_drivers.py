@@ -155,6 +155,60 @@ def test_build_session_factory_driver_arg_beats_env():
     assert isinstance(factory(), DianpingAppiumSession)
 
 
+# --- appium server URL -------------------------------------------------------
+
+
+def _install_fake_appium(monkeypatch, captured):
+    import sys
+    from types import ModuleType
+
+    class FakeUiAutomator2Options:
+        def set_capability(self, name, value):
+            captured.setdefault("caps", {})[name] = value
+
+    def fake_remote(command_executor, options):
+        captured["url"] = command_executor
+        captured["options"] = options
+        return object()
+
+    appium_module = ModuleType("appium")
+    webdriver_module = ModuleType("appium.webdriver")
+    webdriver_module.Remote = fake_remote
+    appium_module.webdriver = webdriver_module
+    options_module = ModuleType("appium.options")
+    android_options_module = ModuleType("appium.options.android")
+    android_options_module.UiAutomator2Options = FakeUiAutomator2Options
+
+    monkeypatch.setitem(sys.modules, "appium", appium_module)
+    monkeypatch.setitem(sys.modules, "appium.webdriver", webdriver_module)
+    monkeypatch.setitem(sys.modules, "appium.options", options_module)
+    monkeypatch.setitem(sys.modules, "appium.options.android", android_options_module)
+
+
+def test_create_appium_driver_strips_trailing_base_path(monkeypatch):
+    from automation_app_dianping.session import create_appium_driver
+
+    captured = {}
+    _install_fake_appium(monkeypatch, captured)
+
+    create_appium_driver(DianpingDeviceConfig(host="127.0.0.1", port=4723))
+
+    # Selenium concatenates the base URL and "/session" verbatim; a trailing
+    # slash would send POST //session, which 404s on Appium's router.
+    assert captured["url"] == "http://127.0.0.1:4723"
+
+
+def test_create_appium_driver_preserves_explicit_base_path(monkeypatch):
+    from automation_app_dianping.session import create_appium_driver
+
+    captured = {}
+    _install_fake_appium(monkeypatch, captured)
+
+    create_appium_driver(DianpingDeviceConfig(path="/wd/hub"))
+
+    assert captured["url"] == "http://127.0.0.1:4723/wd/hub"
+
+
 def test_uia2_launch_app_rejects_non_numeric_settle(monkeypatch):
     import automation_app_dianping.session as session_module
 
