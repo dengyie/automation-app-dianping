@@ -218,8 +218,10 @@ def build_publish_steps(options, selectors):
     photos = _photos_from_parameters(parameters)
     allow_photos = parameters.get("allow_photos")
     if allow_photos is None:
-        # Min-usable default: skip device photo picking unless explicitly enabled.
-        allow_photos = False
+        # Providing photos is itself the opt-in: a caller who passed
+        # --photos expects them attached. The explicit allow_photos flag
+        # still forces the choice either way.
+        allow_photos = bool(photos)
     if not allow_photos:
         photos = []
     app_id = options.app_id or DEFAULT_APP_ID
@@ -290,34 +292,15 @@ def build_publish_steps(options, selectors):
     ]
 
     if ratings:
-        # 2026-09 editor: the overall star row renders immediately, but the
-        # 口味/环境/服务 panel only appears after the overall rating is set,
-        # so the overall rate must run before the panel wait.
-        overall_value = _overall_rating_value(ratings)
-        steps.append(
-            WorkflowStep.action(
-                "rate",
-                dimension="overall",
-                value=overall_value,
-                selector=selectors.overall_rating_selector(overall_value),
-                anchor="overall",
-            )
-        )
-        steps.append(
-            WorkflowStep.action(
-                "wait_for_element",
-                selector=selectors.rating_panel,
-                timeout=8.0,
-            )
-        )
+        # The 2026-09 Picasso editor (DPPicassoBoxActivity) has no star
+        # widget at all: 口味/环境/服务 render as quick-tag chips. The
+        # platform derives the public stars from tag coverage, so rating
+        # intent is expressed by tapping the chips for rated dimensions.
         for key, value in ratings.items():
             steps.append(
                 WorkflowStep.action(
-                    "rate",
-                    dimension=key,
-                    value=value,
+                    "tap",
                     selector=selectors.rating_row_label_selector(key),
-                    anchor="dimension_row",
                 )
             )
 

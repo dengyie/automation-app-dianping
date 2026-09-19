@@ -59,7 +59,10 @@ class DianpingSelectors:
         'uiautomator:new UiSelector().className("android.widget.EditText")',
     )
     rating_panel: SelectorValue = ('uiautomator:new UiSelector().text("口味")',)
-    add_photo: SelectorValue = ("~添加图片", 'uiautomator:new UiSelector().textContains("添加图片")')
+    add_photo: SelectorValue = (
+        "~添加图/视频",
+        'uiautomator:new UiSelector().textContains("添加图")',
+    )
     photo_thumbnail: SelectorValue = (
         'uiautomator:new UiSelector().className("android.widget.ImageView")',
     )

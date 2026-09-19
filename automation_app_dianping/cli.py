@@ -66,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     live.add_argument("--enable-slidex", action="store_true")
     live.add_argument("--mark-published", action="store_true")
+    live.add_argument(
+        "--photos",
+        nargs="+",
+        default=None,
+        metavar="PATH",
+        help="image files to attach to the review (device-local paths)",
+    )
 
     prep = sub.add_parser("prepare-checklist")
     prep.add_argument("--data-dir", default="data")
@@ -120,6 +127,7 @@ def cmd_live(args) -> int:
             enable_slidex=args.enable_slidex,
             shop_name=args.shop_name,
             content=args.content,
+            photos=args.photos,
             device=device,
             env=_apply_live_env(args, os.environ),
             mark_published=args.mark_published,

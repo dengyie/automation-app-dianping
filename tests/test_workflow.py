@@ -166,14 +166,21 @@ def test_publish_workflow_declares_business_success_path():
     action_names = [action.message for action in result.actions]
     assert action_names[0] == "launch_app"
     assert "type_text" in action_names
-    assert "rate" in action_names
     assert "pick_photos" in action_names
     assert any(action.message == "wait_for_element" for action in result.actions)
 
-    rate_actions = [kwargs for name, kwargs in session.actions if name == "rate"]
-    assert any(item.get("dimension") == "taste" and item.get("value") == 5 for item in rate_actions)
-    # Anchor-mode rates (overall + dimension rows) carry no tap fallback.
-    assert all(item.get("anchor") in {"overall", "dimension_row"} for item in rate_actions)
+    # Ratings are expressed as quick-tag chip taps (no star widget on the
+    # 2026-09 editor), so 口味/环境/服务 taps must precede pick_photos.
+    taps = [kwargs for name, kwargs in session.actions if name == "tap"]
+    from automation_app_dianping.config import default_selectors
+
+    chip_selectors = [
+        default_selectors().rating_row_label_selector(key)
+        for key in ("taste", "environment", "service")
+    ]
+    assert any(
+        item.get("selector") in chip_selectors for item in taps
+    )
 
     pick = next(kwargs for name, kwargs in session.actions if name == "pick_photos")
     assert pick["photos"] == ["data/photos/mock-shop-001/dish1.jpg"]
@@ -304,20 +311,24 @@ def test_build_publish_steps_prefer_semantic_actions():
         ),
         default_selectors(),
     )
-    rate_steps = [step for step in steps if step.kind == "action" and step.name == "rate"]
+    # The 2026-09 Picasso editor has no star widget; ratings are expressed
+    # by tapping the 口味/环境/服务 quick-tag chips.
+    tag_selectors = [
+        default_selectors().rating_row_label_selector(key)
+        for key in ("taste", "environment", "service")
+    ]
+    chip_taps = [
+        step
+        for step in steps
+        if step.kind == "action"
+        and step.name == "tap"
+        and step.parameters.get("selector") in tag_selectors
+    ]
     pick_steps = [step for step in steps if step.kind == "action" and step.name == "pick_photos"]
 
-    assert len(rate_steps) == 4
-    assert {step.parameters["dimension"] for step in rate_steps} == {
-        "overall",
-        "taste",
-        "environment",
-        "service",
-    }
-    assert all(
-        step.parameters.get("anchor") in {"overall", "dimension_row"}
-        for step in rate_steps
-    )
+    assert len(chip_taps) == 3
+    tapped = [step.parameters["selector"] for step in chip_taps]
+    assert all(sel in tapped for sel in tag_selectors)
 
     assert len(pick_steps) == 1
     assert pick_steps[0].parameters["photos"] == ["a.jpg", "b.jpg"]
@@ -365,7 +376,7 @@ def test_dianping_capability_runs_through_platform_executor_and_slidex_adapter()
     assert result.steps[0].capability_result.data["metadata"]["text"] == "dianping"
 
 
-def test_publish_steps_include_search_confirm_and_skip_photos_by_default():
+def test_publish_steps_include_search_confirm_and_attach_photos_when_given():
     content = "内容足够长用于构造步骤" * 20
     steps = build_publish_steps(
         WorkflowOptions(
@@ -382,6 +393,24 @@ def test_publish_steps_include_search_confirm_and_skip_photos_by_default():
     names = [step.name for step in steps if step.kind == "action"]
     assert "confirm_search" in names
     assert "dismiss_dialogs" in names
+    # Passing --photos is itself the opt-in: they must be attached.
+    assert "pick_photos" in names
+
+
+def test_publish_steps_skip_photos_when_none_given():
+    content = "内容足够长用于构造步骤" * 20
+    steps = build_publish_steps(
+        WorkflowOptions(
+            parameters={
+                "mode": "publish",
+                "shop_name": "店",
+                "content": content,
+                "ratings": {"taste": 4, "environment": 3, "service": 4},
+            }
+        ),
+        default_selectors(),
+    )
+    names = [step.name for step in steps if step.kind == "action"]
     assert "pick_photos" not in names
 
 
@@ -410,9 +439,11 @@ def test_shop_result_selector_prefers_paren_suffixed_match():
     assert second is not None and "细记港九宵夜大牌档(" not in second
 
 
-def test_publish_rates_overall_before_dimension_panel():
-    """2026-09 editor: the 口味 panel only renders after the overall stars
-    are set, so the overall rate step must precede the panel wait."""
+def test_publish_taps_rating_tag_chips():
+    """2026-09 Picasso editor (DPPicassoBoxActivity) has no star widget:
+    ratings are expressed by tapping the 口味/环境/服务 quick-tag chips,
+    after the review content is typed."""
+    selectors = default_selectors()
     steps = build_publish_steps(
         WorkflowOptions(
             parameters={
@@ -422,19 +453,31 @@ def test_publish_rates_overall_before_dimension_panel():
                 "ratings": {"taste": 5, "environment": 4, "service": 5},
             }
         ),
-        default_selectors(),
+        selectors,
     )
 
-    names = [step.name for step in steps]
-    overall_index = names.index("rate")
-    panel_index = names.index("wait_for_element", overall_index)
+    # No star/anchor rate action survives.
+    assert not any(
+        s.kind == "action" and s.name == "rate" for s in steps
+    )
 
-    overall_step = steps[overall_index]
-    assert overall_step.parameters["anchor"] == "overall"
-    assert overall_step.parameters["value"] == 5  # round(mean(5,4,5))
-    panel_step = steps[panel_index]
-    assert any("口味" in str(c) for c in panel_step.parameters["selector"])
+    chip_selectors = [
+        selectors.rating_row_label_selector(key)
+        for key in ("taste", "environment", "service")
+    ]
+    chip_taps = [
+        s
+        for s in steps
+        if s.kind == "action"
+        and s.name == "tap"
+        and s.parameters.get("selector") in chip_selectors
+    ]
+    tapped = [s.parameters["selector"] for s in chip_taps]
+    assert all(sel in tapped for sel in chip_selectors)
 
-    dimension_steps = [s for s in steps if s.name == "rate"][1:]
-    assert [s.parameters["anchor"] for s in dimension_steps] == ["dimension_row"] * 3
-    assert all("口味" in str(s.parameters["selector"]) for s in dimension_steps[:1])
+    # Chips are tapped after the review content is typed.
+    type_index = next(
+        i for i, s in enumerate(steps) if s.kind == "action" and s.name == "type_text"
+    )
+    first_chip_index = min(steps.index(s) for s in chip_taps)
+    assert first_chip_index > type_index
