@@ -261,3 +261,67 @@ def test_slider_guard_skips_clean_pages():
     assert result.success
     assert calls == []
     assert driver.swipes == []
+
+
+def test_rate_by_label_anchor_taps_right_half_star():
+    from automation_app_dianping.session import DianpingAppiumSession
+
+    class FakeLabelElement:
+        def __init__(self, x, y, width, height):
+            self.rect = {"x": x, "y": y, "width": width, "height": height}
+
+    class FakeRatingDriver(FakeSliderDriver):
+        def __init__(self):
+            super().__init__()
+            self.page_source = _CLEAN_PAGE
+
+        def find_element(self, by, value):
+            return FakeLabelElement(883, 394, 66, 39)
+
+    driver = FakeRatingDriver()
+    session = DianpingAppiumSession(driver, artifact_root="artifacts/test-slider")
+
+    result = session.execute_action(
+        "rate",
+        dimension="overall",
+        value=5,
+        selector=('uiautomator:new UiSelector().text("很棒")',),
+        anchor="overall",
+    )
+
+    assert result.success
+    # Star center y = label bottom (433) + 65 gap; x = label center (916)
+    # lands on the star's right half for a full 5-star rating.
+    assert driver.swipes == [(916, 498, 916, 498, 80)]
+
+
+def test_rate_by_label_anchor_dimension_row():
+    from automation_app_dianping.session import DianpingAppiumSession
+
+    class FakeLabelElement:
+        def __init__(self, x, y, width, height):
+            self.rect = {"x": x, "y": y, "width": width, "height": height}
+
+    class FakeRatingDriver(FakeSliderDriver):
+        def __init__(self):
+            super().__init__()
+            self.page_source = _CLEAN_PAGE
+
+        def find_element(self, by, value):
+            return FakeLabelElement(68, 632, 72, 42)
+
+    driver = FakeRatingDriver()
+    session = DianpingAppiumSession(driver, artifact_root="artifacts/test-slider")
+
+    result = session.execute_action(
+        "rate",
+        dimension="taste",
+        value=5,
+        selector=('uiautomator:new UiSelector().text("口味")',),
+        anchor="dimension_row",
+    )
+
+    assert result.success
+    # x = label right (140) + 115 gap + 143.5 pitch * 4 = 829; y = label
+    # center (653).
+    assert driver.swipes == [(829, 653, 829, 653, 80)]

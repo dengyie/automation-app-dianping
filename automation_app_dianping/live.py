@@ -168,7 +168,10 @@ def build_live_workflow(
             "mode": "publish",
             "shop_name": shop_name,
             "content": content,
-            "ratings": ratings or {"taste": 5, "environment": 4, "service": 4},
+            # All-5 default: the 2026-09 editor derives the overall stars
+            # from these values, and a positive review at 4 stars reads
+            # incoherently on the public page.
+            "ratings": ratings or {"taste": 5, "environment": 5, "service": 5},
             "photos": list(photos or []),
         }
 

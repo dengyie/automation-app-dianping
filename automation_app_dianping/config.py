@@ -78,6 +78,29 @@ class DianpingSelectors:
     )
     rating_stars: Dict[str, Dict[int, str]] = field(default_factory=dict)
 
+    # 2026-09 editor geometry (OnePlus 7T, 1080px width): the overall row
+    # stacks each star under its emoji+label, and a dimension row places its
+    # label left of the star strip. Integer values tap the star's right half
+    # (the left half rates the half star). Consumed by the session's
+    # label-anchored rate mode; see DianpingAppiumSession._rate_by_label_anchor.
+    rating_overall_labels: Dict[int, str] = field(
+        default_factory=lambda: {1: "很糟糕", 2: "较差", 3: "一般", 4: "还可以", 5: "很棒"}
+    )
+    rating_overall_star_gap_px: float = 65.0
+    rating_dim_star_gap_px: float = 115.0
+    rating_dim_star_pitch_px: float = 143.5
+
+    def overall_rating_selector(self, value: int) -> SelectorValue:
+        label = self.rating_overall_labels.get(int(value))
+        if not label:
+            raise ValueError("overall rating value must be 1-5")
+        return ('uiautomator:new UiSelector().text("%s")' % label,)
+
+    def rating_row_label_selector(self, dimension: str) -> SelectorValue:
+        labels = {"taste": "口味", "environment": "环境", "service": "服务"}
+        label = labels.get(dimension, dimension)
+        return ('uiautomator:new UiSelector().text("%s")' % label,)
+
     def rating_star(self, dimension: str, value: int) -> Optional[str]:
         return (self.rating_stars.get(dimension) or {}).get(value)
 

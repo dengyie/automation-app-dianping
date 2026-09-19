@@ -380,6 +380,16 @@ class DianpingAppiumSession:
         selector = kwargs.get("selector") or kwargs.get("fallback_selector")
         if selector is None:
             return ActionResult(False, "rate requires selector")
+        anchor = kwargs.get("anchor")
+        if anchor in {"overall", "dimension_row"}:
+            result = self._rate_by_label_anchor(selector, anchor, kwargs.get("value"))
+            if result.success:
+                return ActionResult(
+                    True,
+                    "rate",
+                    data={"dimension": kwargs.get("dimension"), "value": kwargs.get("value")},
+                )
+            return self._maybe_fallback("rate", kwargs, result)
         result = self.execute_action("tap", selector=selector)
         if result.success:
             return ActionResult(
@@ -388,6 +398,51 @@ class DianpingAppiumSession:
                 data={"dimension": kwargs.get("dimension"), "value": kwargs.get("value")},
             )
         return self._maybe_fallback("rate", kwargs, result)
+
+    def _rate_by_label_anchor(self, selector: Any, anchor: str, value: Any) -> ActionResult:
+        """Tap a rating star by anchoring on its text label.
+
+        The 2026-09 editor exposes no stable star ids: the overall row stacks
+        each star under its emoji+label (integer values tap the right half,
+        the left half rates a half star), and dimension rows place the label
+        left of the star strip. Geometry constants live on DianpingSelectors.
+        """
+        from automation_app_dianping.config import default_selectors
+
+        try:
+            numeric_value = int(value)
+        except (TypeError, ValueError):
+            return ActionResult(False, "rate requires a numeric value")
+        if not 1 <= numeric_value <= 5:
+            return ActionResult(False, "rating value must be 1-5")
+        selectors = default_selectors()
+        candidates = as_selector_list(selector) if selector is not None else []
+        errors = []
+        for candidate in candidates:
+            try:
+                by, label_value = parse_locator(candidate)
+                element = self._find_element(label_value, by=by, timeout=5.0)
+                rect = element.rect
+            except Exception as exc:
+                errors.append("%s: %s" % (candidate, exc))
+                continue
+            if anchor == "overall":
+                x = rect["x"] + rect["width"] / 2
+                y = rect["y"] + rect["height"] + selectors.rating_overall_star_gap_px
+            else:
+                x = (
+                    rect["x"]
+                    + rect["width"]
+                    + selectors.rating_dim_star_gap_px
+                    + selectors.rating_dim_star_pitch_px * (numeric_value - 1)
+                )
+                y = rect["y"] + rect["height"] / 2
+            swipe = getattr(self.driver, "swipe", None)
+            if not callable(swipe):
+                return ActionResult(False, "driver does not support coordinate taps")
+            swipe(int(x), int(y), int(x), int(y), 80)
+            return ActionResult(True, "star tapped at (%d, %d)" % (int(x), int(y)))
+        return ActionResult(False, "rate anchor failed: %s" % "; ".join(errors))
 
     def _pick_photos(self, **kwargs: Any) -> ActionResult:
         if kwargs.get("fallback_steps"):

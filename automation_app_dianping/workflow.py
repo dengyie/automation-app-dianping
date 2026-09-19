@@ -193,6 +193,18 @@ def _shop_result_selector(selectors, shop_name):
     return ordered if len(ordered) != 1 else ordered[0]
 
 
+def _overall_rating_value(ratings: dict) -> int:
+    """Derive the overall star value from the dimension ratings."""
+    values = []
+    for value in (ratings or {}).values():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        values.append(int(value))
+    if not values:
+        raise ValueError("ratings require at least one numeric value")
+    return max(1, min(5, round(sum(values) / len(values))))
+
+
 def build_publish_steps(options, selectors):
     parameters = dict(getattr(options, "parameters", None) or {})
     shop_name = _string_param(parameters, "shop_name")
@@ -278,28 +290,34 @@ def build_publish_steps(options, selectors):
     ]
 
     if ratings:
+        # 2026-09 editor: the overall star row renders immediately, but the
+        # 口味/环境/服务 panel only appears after the overall rating is set,
+        # so the overall rate must run before the panel wait.
+        overall_value = _overall_rating_value(ratings)
+        steps.append(
+            WorkflowStep.action(
+                "rate",
+                dimension="overall",
+                value=overall_value,
+                selector=selectors.overall_rating_selector(overall_value),
+                anchor="overall",
+            )
+        )
         steps.append(
             WorkflowStep.action(
                 "wait_for_element",
                 selector=selectors.rating_panel,
-                timeout=5.0,
+                timeout=8.0,
             )
         )
-        # Prefer platform semantic action (REQ-001). Fallback keeps offline
-        # fake sessions working when adapter only knows tap/type primitives.
         for key, value in ratings.items():
-            if hasattr(selectors, "rating_selector"):
-                selector = selectors.rating_selector(key, value)
-            else:
-                selector = selectors.rating_star(key, value)
             steps.append(
                 WorkflowStep.action(
                     "rate",
                     dimension=key,
                     value=value,
-                    selector=selector,
-                    fallback_action="tap",
-                    fallback_selector=selector if isinstance(selector, str) else None,
+                    selector=selectors.rating_row_label_selector(key),
+                    anchor="dimension_row",
                 )
             )
 

@@ -172,7 +172,8 @@ def test_publish_workflow_declares_business_success_path():
 
     rate_actions = [kwargs for name, kwargs in session.actions if name == "rate"]
     assert any(item.get("dimension") == "taste" and item.get("value") == 5 for item in rate_actions)
-    assert all(item.get("fallback_action") == "tap" for item in rate_actions)
+    # Anchor-mode rates (overall + dimension rows) carry no tap fallback.
+    assert all(item.get("anchor") in {"overall", "dimension_row"} for item in rate_actions)
 
     pick = next(kwargs for name, kwargs in session.actions if name == "pick_photos")
     assert pick["photos"] == ["data/photos/mock-shop-001/dish1.jpg"]
@@ -306,9 +307,17 @@ def test_build_publish_steps_prefer_semantic_actions():
     rate_steps = [step for step in steps if step.kind == "action" and step.name == "rate"]
     pick_steps = [step for step in steps if step.kind == "action" and step.name == "pick_photos"]
 
-    assert len(rate_steps) == 3
-    assert {step.parameters["dimension"] for step in rate_steps} == {"taste", "environment", "service"}
-    assert all(step.parameters.get("fallback_action") == "tap" for step in rate_steps)
+    assert len(rate_steps) == 4
+    assert {step.parameters["dimension"] for step in rate_steps} == {
+        "overall",
+        "taste",
+        "environment",
+        "service",
+    }
+    assert all(
+        step.parameters.get("anchor") in {"overall", "dimension_row"}
+        for step in rate_steps
+    )
 
     assert len(pick_steps) == 1
     assert pick_steps[0].parameters["photos"] == ["a.jpg", "b.jpg"]
@@ -399,3 +408,33 @@ def test_shop_result_selector_prefers_paren_suffixed_match():
     assert "细记港九宵夜大牌档(" in first
     second = candidates[1] if isinstance(candidates, (list, tuple)) and len(candidates) > 1 else None
     assert second is not None and "细记港九宵夜大牌档(" not in second
+
+
+def test_publish_rates_overall_before_dimension_panel():
+    """2026-09 editor: the 口味 panel only renders after the overall stars
+    are set, so the overall rate step must precede the panel wait."""
+    steps = build_publish_steps(
+        WorkflowOptions(
+            parameters={
+                "mode": "publish",
+                "shop_name": "店",
+                "content": "内容足够长用于构造步骤" * 20,
+                "ratings": {"taste": 5, "environment": 4, "service": 5},
+            }
+        ),
+        default_selectors(),
+    )
+
+    names = [step.name for step in steps]
+    overall_index = names.index("rate")
+    panel_index = names.index("wait_for_element", overall_index)
+
+    overall_step = steps[overall_index]
+    assert overall_step.parameters["anchor"] == "overall"
+    assert overall_step.parameters["value"] == 5  # round(mean(5,4,5))
+    panel_step = steps[panel_index]
+    assert any("口味" in str(c) for c in panel_step.parameters["selector"])
+
+    dimension_steps = [s for s in steps if s.name == "rate"][1:]
+    assert [s.parameters["anchor"] for s in dimension_steps] == ["dimension_row"] * 3
+    assert all("口味" in str(s.parameters["selector"]) for s in dimension_steps[:1])
