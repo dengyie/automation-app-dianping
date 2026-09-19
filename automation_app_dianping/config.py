@@ -54,12 +54,14 @@ class DianpingSelectors:
     )
     review_input: SelectorValue = (
         "id:com.dianping.v1:id/review_content",
-        'uiautomator:new UiSelector().className("android.widget.EditText").instance(0)',
+        # The 2026-09 Picasso editor renders the review box with no
+        # resource-id; the class-only UiSelector stays the stable fallback.
+        'uiautomator:new UiSelector().className("android.widget.EditText")',
     )
     rating_panel: SelectorValue = ('uiautomator:new UiSelector().text("口味")',)
     add_photo: SelectorValue = ("~添加图片", 'uiautomator:new UiSelector().textContains("添加图片")')
     photo_thumbnail: SelectorValue = (
-        'uiautomator:new UiSelector().className("android.widget.ImageView").instance(0)',
+        'uiautomator:new UiSelector().className("android.widget.ImageView")',
     )
     photo_confirm: SelectorValue = ("~完成", 'uiautomator:new UiSelector().text("完成")')
     submit: SelectorValue = ("~发布", 'uiautomator:new UiSelector().text("发布")')
