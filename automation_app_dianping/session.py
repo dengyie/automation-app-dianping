@@ -485,10 +485,11 @@ class DianpingAppiumSession:
                 )
                 y = rect["y"] + rect["height"] + selectors.rating_overall_star_gap_px
             else:
+                # Measured 2026-09 strip: first star centre 236, pitch 144 —
+                # tap star centres, no width fraction.
                 x = (
                     selectors.rating_dim_star_origin_px
                     + selectors.rating_dim_star_pitch_px * (numeric_value - 1)
-                    + selectors.rating_star_tap_fraction * selectors.rating_star_width_px
                 )
                 y = rect["y"] + rect["height"] / 2
             swipe = getattr(self.driver, "swipe", None)
@@ -861,6 +862,8 @@ class DianpingUia2Session:
             return self._rate(**kwargs)
         if action_name == "element_bounds":
             return self._element_bounds(**kwargs)
+        if action_name == "pick_photos":
+            return self._pick_photos_uia2(**kwargs)
         if action_name in {"tap", "type_text", "wait_for_element"}:
             result = self._with_translated_candidates(action_name, kwargs)
         else:
@@ -882,23 +885,31 @@ class DianpingUia2Session:
         SelectorValue tuples carry fallbacks (e.g. the new search bar id,
         then ~搜索, then legacy ids); each string candidate is translated
         into the kit ``by`` vocabulary and tried until one succeeds.
+
+        Page transitions race the lookup (u2 resolves lazily, so an instant
+        wait_for_element hit can go stale before the action runs), so a
+        missing-element failure is retried once after a short settle.
         """
         selector = kwargs.get("selector")
         candidates = as_selector_list(selector) if selector is not None else []
         errors = []
-        for candidate in candidates:
-            translated = translate_uiautomator_selector(candidate)
-            if translated is None:
-                errors.append("%s: untranslatable" % candidate)
-                continue
-            by, value = translated
-            call_kwargs = dict(kwargs)
-            call_kwargs["selector"] = value
-            call_kwargs["by"] = by
-            result = self._session.execute_action(action_name, **call_kwargs)
-            if result.success:
-                return result
-            errors.append("%s: %s" % (candidate, result.message))
+        for attempt in range(2):
+            for candidate in candidates:
+                translated = translate_uiautomator_selector(candidate)
+                if translated is None:
+                    if attempt == 0:
+                        errors.append("%s: untranslatable" % candidate)
+                    continue
+                by, value = translated
+                call_kwargs = dict(kwargs)
+                call_kwargs["selector"] = value
+                call_kwargs["by"] = by
+                result = self._session.execute_action(action_name, **call_kwargs)
+                if result.success:
+                    return result
+                errors.append("%s: %s" % (candidate, result.message))
+            if attempt == 0 and candidates:
+                time.sleep(2.0)
         if not candidates:
             return self._session.execute_action(action_name, **kwargs)
         return ActionResult(
@@ -946,31 +957,42 @@ class DianpingUia2Session:
             if result.success and isinstance(result.data, dict):
                 label_rect = result.data
                 break
-        if label_rect is None:
-            return ActionResult(False, "rate anchor label not found on uia2")
-        from automation_app_dianping.config import default_selectors
-
         try:
             numeric_value = int(kwargs.get("value"))
         except (TypeError, ValueError):
             return ActionResult(False, "rate requires a numeric value")
         if not 1 <= numeric_value <= 5:
             return ActionResult(False, "rating value must be 1-5")
-        selectors = default_selectors()
+        # Overall bar: a 5-option segmented control whose options ARE the
+        # tappable text labels (很糟糕..超预期). Tap the label directly; no
+        # star geometry to guess. The selector already resolves to the
+        # target label via overall_rating_selector(value).
         if anchor == "overall":
-            x = (
-                selectors.rating_overall_star_origin_px
-                + selectors.rating_overall_star_pitch_px * (numeric_value - 1)
-                + selectors.rating_star_tap_fraction * selectors.rating_star_width_px
+            if label_rect is None:
+                return ActionResult(False, "overall rating label not found on uia2")
+            tap = self._with_translated_candidates(
+                "tap", {"selector": kwargs.get("selector")}
             )
-            y = label_rect["y"] + label_rect["height"] + selectors.rating_overall_star_gap_px
-        else:
-            x = (
-                selectors.rating_dim_star_origin_px
-                + selectors.rating_dim_star_pitch_px * (numeric_value - 1)
-                + selectors.rating_star_tap_fraction * selectors.rating_star_width_px
-            )
-            y = label_rect["y"] + label_rect["height"] / 2
+            if not tap.success:
+                return ActionResult(
+                    False, "overall rating tap failed: %s" % tap.message
+                )
+            return ActionResult(True, "uia2 overall rating set")
+        # Dimension rows (口味/环境/服务): a 5-star strip to the right of the
+        # row label. Resolve the row label's bounds, then tap the Nth star
+        # by geometry across the strip.
+        if label_rect is None:
+            return ActionResult(False, "dimension rating label not found on uia2")
+        from automation_app_dianping.config import default_selectors
+
+        selectors = default_selectors()
+        # Tap the Nth star's centre. The strip's first-star centre and the
+        # pitch were measured on the 2026-09 editor (236px, 144px pitch).
+        x = (
+            selectors.rating_dim_star_origin_px
+            + selectors.rating_dim_star_pitch_px * (numeric_value - 1)
+        )
+        y = label_rect["y"] + label_rect["height"] / 2
         try:
             result = self._session.execute_action(
                 "swipe",
@@ -984,8 +1006,6 @@ class DianpingUia2Session:
             return ActionResult(False, "uia2 rate swipe failed: %s" % exc)
         if not result.success:
             return result
-        if anchor == "overall":
-            self._resolve_half_star_popup(numeric_value)
         return ActionResult(True, "uia2 star tapped at (%d, %d)" % (int(x), int(y)))
 
     def _resolve_half_star_popup(self, value: int) -> None:
@@ -1013,6 +1033,70 @@ class DianpingUia2Session:
             if result.success:
                 return result
         return ActionResult(False, "element_bounds failed for all selectors")
+
+    def _pick_photos_uia2(self, **kwargs: Any) -> ActionResult:
+        """Attach review photos on the 2026-09 editor.
+
+        Taps the 添加图/视频 entry, then selects the first ``len(photos)``
+        gallery thumbnails (the picker offers no path input; the caller is
+        responsible for having pushed the intended images to the front of
+        the device gallery), then confirms.
+        """
+        photos = kwargs.get("photos") or []
+        if not photos:
+            return ActionResult(True, "pick_photos: nothing to attach")
+        add = self._with_translated_candidates(
+            "tap", {"selector": kwargs.get("add_selector")}
+        )
+        if not add.success:
+            return ActionResult(False, "pick_photos: add button not found: %s" % add.message)
+        time.sleep(1.5)
+        thumb_selector = kwargs.get("thumbnail_selector")
+        selected = 0
+        for index in range(len(photos)):
+            # The picker lays thumbnails out in a grid; the class-only
+            # ImageView selector resolves the first unselected tile as the
+            # grid scrolls, so tapping instance-by-instance walks the row.
+            tap = self._pick_photo_tile(thumb_selector, index)
+            if not tap.success:
+                break
+            selected += 1
+            time.sleep(0.4)
+        if selected == 0:
+            return ActionResult(False, "pick_photos: no gallery thumbnail tapped")
+        confirm = self._with_translated_candidates(
+            "tap", {"selector": kwargs.get("confirm_selector")}
+        )
+        if not confirm.success:
+            return ActionResult(
+                False, "pick_photos: confirm not found: %s" % confirm.message
+            )
+        return ActionResult(
+            True, "pick_photos: attached %d photo(s)" % selected
+        )
+
+    def _pick_photo_tile(self, thumb_selector: Any, index: int) -> ActionResult:
+        """Tap the gallery thumbnail at ``index`` via a UiSelector instance."""
+        base = None
+        for candidate in as_selector_list(thumb_selector) if thumb_selector else []:
+            if isinstance(candidate, str) and "className" in candidate:
+                base = candidate
+                break
+        if base is None:
+            return self._with_translated_candidates(
+                "tap", {"selector": thumb_selector}
+            )
+        # Insert an .instance(index) so successive taps hit successive tiles;
+        # the kit translator rejects instance() chains, so drive u2 directly.
+        cls = base.split('className("', 1)[1].split('")', 1)[0]
+        try:
+            widget = self._session.driver(className=cls, instance=index)
+            if not widget.exists:
+                return ActionResult(False, "thumbnail instance %d absent" % index)
+            widget.click()
+            return ActionResult(True, "tapped thumbnail %d" % index)
+        except Exception as exc:
+            return ActionResult(False, "thumbnail tap failed: %s" % exc)
 
     def _retry_after_manual_window(
         self, action_name: str, kwargs: Dict[str, Any], failure: ActionResult
@@ -1100,6 +1184,14 @@ def build_uia2_session_factory(
     def factory() -> DianpingUia2Session:
         kit_session_cls = _import_kit_uia2_session()
         device = _connect_uia2(config.udid)
+        # u2's implicit element wait defaults to 20s, so every tap/type on a
+        # missing selector burned the full 20s before falling through to the
+        # next candidate. The workflow already gates each action with an
+        # explicit wait_for_element, so a short implicit wait is enough.
+        try:
+            device.settings["wait_timeout"] = 8.0
+        except Exception:
+            pass
         identifier = str(config.udid or config.device_name or "dianping-uia2")
         return DianpingUia2Session(
             kit_session_cls(

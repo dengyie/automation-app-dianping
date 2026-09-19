@@ -450,8 +450,9 @@ def test_uia2_rate_uses_label_anchor_geometry(monkeypatch):
     bounds_call, rate_swipe = kit.calls[0], kit.calls[-1]
     assert bounds_call[0] == "element_bounds"
     assert rate_swipe[0] == "swipe"
-    # x = 188 + 143.5*4 + 0.85*89 = 837; y = label center = 632+21 = 653.
-    assert rate_swipe[1]["start_x"] == 837 and rate_swipe[1]["start_y"] == 653
+    # 2026-09 measured strip: first star centre 236, pitch 144 → 5th star
+    # x = 236 + 144*4 = 812; y = label centre = 632+21 = 653.
+    assert rate_swipe[1]["start_x"] == 812 and rate_swipe[1]["start_y"] == 653
 
 
 def test_uia2_rate_requires_label_anchor(monkeypatch):

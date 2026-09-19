@@ -292,15 +292,27 @@ def build_publish_steps(options, selectors):
     ]
 
     if ratings:
-        # The 2026-09 Picasso editor (DPPicassoBoxActivity) has no star
-        # widget at all: 口味/环境/服务 render as quick-tag chips. The
-        # platform derives the public stars from tag coverage, so rating
-        # intent is expressed by tapping the chips for rated dimensions.
+        # 2026-09 editor: the overall star bar (很糟糕..超预期) renders with
+        # the editor; the 口味/环境/服务 rows sit below it. Overall first,
+        # then the per-dimension rows by label anchor.
+        overall_value = _overall_rating_value(ratings)
+        steps.append(
+            WorkflowStep.action(
+                "rate",
+                dimension="overall",
+                value=overall_value,
+                selector=selectors.overall_rating_selector(overall_value),
+                anchor="overall",
+            )
+        )
         for key, value in ratings.items():
             steps.append(
                 WorkflowStep.action(
-                    "tap",
+                    "rate",
+                    dimension=key,
+                    value=value,
                     selector=selectors.rating_row_label_selector(key),
+                    anchor="dimension_row",
                 )
             )
 

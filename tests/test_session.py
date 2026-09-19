@@ -323,9 +323,9 @@ def test_rate_by_label_anchor_dimension_row():
     )
 
     assert result.success
-    # x = origin (188) + pitch (143.5) * 4 + 0.85 * width (89) = 837; y =
-    # label center (653).
-    assert driver.swipes == [(837, 653, 837, 653, 80)]
+    # 2026-09 measured strip: 5th star x = 236 + 144*4 = 812; y = label
+    # center (653).
+    assert driver.swipes == [(812, 653, 812, 653, 80)]
 
 
 def test_manual_captcha_window_recovers_blocked_action():

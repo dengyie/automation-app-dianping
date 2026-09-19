@@ -90,13 +90,22 @@ class DianpingSelectors:
     # the half-star and the full star sits at ~0.8 of the star width, so the
     # tap lands at 0.85 to select the integer value deterministically.
     rating_overall_labels: Dict[int, str] = field(
-        default_factory=lambda: {1: "很糟糕", 2: "较差", 3: "一般", 4: "还可以", 5: "很棒"}
+        default_factory=lambda: {
+            1: "很糟糕",
+            2: "较差",
+            3: "一般",
+            4: "还可以",
+            # 2026-09 editor: the fifth overall label is 超预期 (很棒 belongs
+            # to the dimension rows' picker, not the overall bar).
+            5: "超预期",
+        }
     )
     rating_overall_star_origin_px: float = 144.0
     rating_overall_star_pitch_px: float = 176.0
     rating_overall_star_gap_px: float = 65.0
-    rating_dim_star_origin_px: float = 188.0
-    rating_dim_star_pitch_px: float = 143.5
+    # Dimension rows: first star centre x=236, pitch=144 (measured 2026-09).
+    rating_dim_star_origin_px: float = 236.0
+    rating_dim_star_pitch_px: float = 144.0
     rating_star_width_px: float = 89.0
     rating_star_tap_fraction: float = 0.85
 
