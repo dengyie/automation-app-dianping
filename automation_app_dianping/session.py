@@ -178,7 +178,7 @@ class DianpingAppiumSession:
     """DriverSession-compatible Appium session with multi-selector support."""
 
     _SLIDER_GUARDED_ACTIONS = frozenset(
-        {"tap", "type_text", "confirm_search", "rate", "pick_photos"}
+        {"tap", "type_text", "wait_for_element", "confirm_search", "rate", "pick_photos"}
     )
 
     def __init__(
@@ -188,14 +188,21 @@ class DianpingAppiumSession:
         identifier: str = "dianping-appium",
         artifact_root: Optional[Path] = None,
         slider_solver: Optional[Callable[[Any], Any]] = None,
+        captcha_window_seconds: float = 0.0,
     ):
         self.driver = driver
         self.info = SessionInfo(driver_name="appium", platform="android", identifier=identifier)
         self.artifact_root = Path(artifact_root or "artifacts/dianping-live")
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self.slider_solver = slider_solver
+        # Risk-control dialogs (e.g. the jigsaw slider) render without
+        # accessibility nodes, so they are invisible to page-source detection;
+        # the manual window keeps retrying a blocked action while a human
+        # solves the challenge on the device.
+        self.captcha_window_seconds = float(captcha_window_seconds)
         self._started = False
         self._slider_guard_active = False
+        self._manual_window_active = False
 
     def start(self) -> None:
         self._started = True
@@ -244,9 +251,41 @@ class DianpingAppiumSession:
             result = self._maybe_fallback(action_name, kwargs, failed)
         if result.success and action_name in self._SLIDER_GUARDED_ACTIONS:
             result = self._guard_slider(action_name, result, kwargs)
+        elif (
+            not result.success
+            and action_name in self._SLIDER_GUARDED_ACTIONS
+            and self.captcha_window_seconds > 0
+            and not self._manual_window_active
+        ):
+            result = self._retry_after_manual_window(action_name, kwargs, result)
         if not result.success:
             self._dump_failure(action_name)
         return result
+
+    def _retry_after_manual_window(
+        self, action_name: str, kwargs: Dict[str, Any], failure: ActionResult
+    ) -> ActionResult:
+        """Keep re-attempting a blocked action while a human solves a challenge.
+
+        Risk-control dialogs expose no accessibility nodes, so the session
+        cannot see them; it can only observe that the action stopped failing
+        once the challenge is cleared on the device.
+        """
+        self._manual_window_active = True
+        try:
+            deadline = time.time() + self.captcha_window_seconds
+            while time.time() < deadline:
+                time.sleep(min(5.0, max(1.0, deadline - time.time())))
+                retry = self.execute_action(action_name, **kwargs)
+                if retry.success:
+                    return ActionResult(
+                        True,
+                        "%s (recovered after manual captcha window)" % action_name,
+                        data=retry.data,
+                    )
+            return failure
+        finally:
+            self._manual_window_active = False
 
     def _guard_slider(self, action_name: str, result: ActionResult, kwargs: Dict[str, Any]) -> ActionResult:
         """Detect risk-control sliders that appeared during an action.
@@ -692,6 +731,7 @@ def build_session_factory(
             identifier=str(identifier),
             artifact_root=Path(config.artifact_root),
             slider_solver=slider_solver,
+            captcha_window_seconds=config.captcha_window_seconds,
         )
 
     return factory

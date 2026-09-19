@@ -326,3 +326,46 @@ def test_rate_by_label_anchor_dimension_row():
     # x = origin (188) + pitch (143.5) * 4 + 0.85 * width (89) = 837; y =
     # label center (653).
     assert driver.swipes == [(837, 653, 837, 653, 80)]
+
+
+def test_manual_captcha_window_recovers_blocked_action():
+    from automation_app_dianping.session import DianpingAppiumSession
+
+    class FlakyBlockedDriver(FakeSliderDriver):
+        def __init__(self):
+            super().__init__()
+            self.page_source = _CLEAN_PAGE
+            self.attempts = 0
+
+        def find_element(self, by, value):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise LookupError("blocked by challenge")
+            return self.element
+
+    driver = FlakyBlockedDriver()
+    session = DianpingAppiumSession(
+        driver,
+        artifact_root="artifacts/test-slider",
+        captcha_window_seconds=6,
+    )
+
+    result = session.execute_action("wait_for_element", selector="~写评价", timeout=0.5)
+
+    assert result.success
+    assert "manual captcha window" in result.message
+    assert driver.attempts == 3
+
+
+def test_manual_captcha_window_disabled_by_default():
+    from automation_app_dianping.session import DianpingAppiumSession
+
+    driver = FakeSliderDriver()
+    driver.page_source = _CLEAN_PAGE
+    session = DianpingAppiumSession(driver, artifact_root="artifacts/test-slider")
+
+    result = session.execute_action(
+        "wait_for_element", selector="~missing", timeout=0.5
+    )
+
+    assert not result.success

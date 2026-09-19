@@ -156,6 +156,9 @@ class DianpingDeviceConfig:
     auto_grant_permissions: bool = True
     new_command_timeout: int = 300
     artifact_root: str = "artifacts/dianping-live"
+    # Seconds to keep retrying a blocked action while a human solves a
+    # risk-control challenge on the device (0 disables the window).
+    captcha_window_seconds: float = 0.0
 
 
 @dataclass(frozen=True)

@@ -57,6 +57,13 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--udid", default=None)
     live.add_argument("--appium-host", default=None)
     live.add_argument("--appium-port", type=int, default=None)
+    live.add_argument(
+        "--captcha-window",
+        type=float,
+        default=0.0,
+        help="seconds to keep retrying a blocked action while a human solves "
+        "a risk-control challenge on the device (default: disabled)",
+    )
     live.add_argument("--enable-slidex", action="store_true")
     live.add_argument("--mark-published", action="store_true")
 
@@ -92,7 +99,7 @@ def cmd_live(args) -> int:
     from automation_app_dianping.live import run_live
 
     device = None
-    if args.udid or args.appium_host or args.appium_port:
+    if args.udid or args.appium_host or args.appium_port or args.captcha_window:
         # Without this the --udid flag was parsed but silently ignored, and a
         # multi-device adb host would target whichever device the driver
         # auto-picks instead of the requested one.
@@ -100,6 +107,7 @@ def cmd_live(args) -> int:
             udid=args.udid,
             host=args.appium_host or "127.0.0.1",
             port=args.appium_port or 4723,
+            captcha_window_seconds=args.captcha_window,
         )
 
     return _print_result(
