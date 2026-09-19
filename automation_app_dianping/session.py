@@ -427,22 +427,43 @@ class DianpingAppiumSession:
                 errors.append("%s: %s" % (candidate, exc))
                 continue
             if anchor == "overall":
-                x = rect["x"] + rect["width"] / 2
+                x = (
+                    selectors.rating_overall_star_origin_px
+                    + selectors.rating_overall_star_pitch_px * (numeric_value - 1)
+                    + selectors.rating_star_tap_fraction * selectors.rating_star_width_px
+                )
                 y = rect["y"] + rect["height"] + selectors.rating_overall_star_gap_px
             else:
                 x = (
-                    rect["x"]
-                    + rect["width"]
-                    + selectors.rating_dim_star_gap_px
+                    selectors.rating_dim_star_origin_px
                     + selectors.rating_dim_star_pitch_px * (numeric_value - 1)
+                    + selectors.rating_star_tap_fraction * selectors.rating_star_width_px
                 )
                 y = rect["y"] + rect["height"] / 2
             swipe = getattr(self.driver, "swipe", None)
             if not callable(swipe):
                 return ActionResult(False, "driver does not support coordinate taps")
             swipe(int(x), int(y), int(x), int(y), 80)
+            if anchor == "overall":
+                self._resolve_half_star_popup(numeric_value)
             return ActionResult(True, "star tapped at (%d, %d)" % (int(x), int(y)))
         return ActionResult(False, "rate anchor failed: %s" % "; ".join(errors))
+
+    def _resolve_half_star_popup(self, value: int) -> None:
+        """Pick the exact integer if the tap split a star.
+
+        Tapping near the half-star boundary opens a chooser with the two
+        adjacent values (e.g. 4.5星/5星); tapping the integer option pins the
+        rating. Best effort: the popup only exists after a split tap.
+        """
+        try:
+            by, popup_value = parse_locator(
+                'uiautomator:new UiSelector().text("%s星")' % value
+            )
+            element = self._find_element(popup_value, by=by, timeout=1.5)
+            element.click()
+        except Exception:
+            pass
 
     def _pick_photos(self, **kwargs: Any) -> ActionResult:
         if kwargs.get("fallback_steps"):

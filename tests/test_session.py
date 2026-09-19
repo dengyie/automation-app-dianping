@@ -290,9 +290,10 @@ def test_rate_by_label_anchor_taps_right_half_star():
     )
 
     assert result.success
-    # Star center y = label bottom (433) + 65 gap; x = label center (916)
-    # lands on the star's right half for a full 5-star rating.
-    assert driver.swipes == [(916, 498, 916, 498, 80)]
+    # x = star strip origin (144) + pitch (176) * 4 + 0.85 * star width (89)
+    # lands past the half-star split for a full 5-star rating; y anchors on
+    # the label bottom (433) + 65 gap.
+    assert driver.swipes == [(923, 498, 923, 498, 80)]
 
 
 def test_rate_by_label_anchor_dimension_row():
@@ -322,6 +323,6 @@ def test_rate_by_label_anchor_dimension_row():
     )
 
     assert result.success
-    # x = label right (140) + 115 gap + 143.5 pitch * 4 = 829; y = label
-    # center (653).
-    assert driver.swipes == [(829, 653, 829, 653, 80)]
+    # x = origin (188) + pitch (143.5) * 4 + 0.85 * width (89) = 837; y =
+    # label center (653).
+    assert driver.swipes == [(837, 653, 837, 653, 80)]

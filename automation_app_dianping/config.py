@@ -78,17 +78,22 @@ class DianpingSelectors:
     )
     rating_stars: Dict[str, Dict[int, str]] = field(default_factory=dict)
 
-    # 2026-09 editor geometry (OnePlus 7T, 1080px width): the overall row
-    # stacks each star under its emoji+label, and a dimension row places its
-    # label left of the star strip. Integer values tap the star's right half
-    # (the left half rates the half star). Consumed by the session's
-    # label-anchored rate mode; see DianpingAppiumSession._rate_by_label_anchor.
+    # 2026-09 editor geometry (OnePlus 7T, 1080px width). The overall row
+    # stacks each star under its emoji+label (y anchors on the label bottom,
+    # x on the measured star strip); dimension rows place the label left of
+    # the star strip (y anchors on the label center). Measured split between
+    # the half-star and the full star sits at ~0.8 of the star width, so the
+    # tap lands at 0.85 to select the integer value deterministically.
     rating_overall_labels: Dict[int, str] = field(
         default_factory=lambda: {1: "很糟糕", 2: "较差", 3: "一般", 4: "还可以", 5: "很棒"}
     )
+    rating_overall_star_origin_px: float = 144.0
+    rating_overall_star_pitch_px: float = 176.0
     rating_overall_star_gap_px: float = 65.0
-    rating_dim_star_gap_px: float = 115.0
+    rating_dim_star_origin_px: float = 188.0
     rating_dim_star_pitch_px: float = 143.5
+    rating_star_width_px: float = 89.0
+    rating_star_tap_fraction: float = 0.85
 
     def overall_rating_selector(self, value: int) -> SelectorValue:
         label = self.rating_overall_labels.get(int(value))
