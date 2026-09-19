@@ -70,6 +70,7 @@ def test_session_actions(tmp_path):
     assert session.execute_action("type_text", selector="id:a", text="hi").success
     assert session.execute_action("wait_for_element", selector="~ok", timeout=0.2).success
     assert session.execute_action("rate", selector="~star").success
+    # appium pick_photos stays a tap-expansion shim (uia2 does gallery prep)
     assert session.execute_action(
         "pick_photos",
         photos=["a.jpg"],
@@ -92,7 +93,11 @@ def test_more_session_paths(tmp_path):
     assert session.execute_action('type_text', selector='~a').success is False
     assert session.execute_action('wait_for_element', selector='uiautomator:missing', timeout=0.2).success is False
     assert session.execute_action('rate').success is False
-    assert session.execute_action('pick_photos', photos=['a.jpg'], add_selector='~add', thumbnail_selector='~t', confirm_selector='~c').success
+    # appium pick_photos stays a tap-expansion shim (uia2 does gallery prep)
+    assert session.execute_action(
+        'pick_photos', photos=['a.jpg'], add_selector='~add',
+        thumbnail_selector='~t', confirm_selector='~c',
+    ).success
     assert session.execute_action('unknown_action').success is False
     assert Path(session.capture_artifact('page_source','u.xml').path).exists()
 

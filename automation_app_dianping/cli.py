@@ -71,7 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         metavar="PATH",
-        help="image files to attach to the review (device-local paths)",
+        help="host-side image files to attach; each is staged onto the "
+        "device gallery with its EXIF capture time set to now so it is "
+        "the picker's first tile (verified before selecting)",
     )
 
     prep = sub.add_parser("prepare-checklist")

@@ -464,6 +464,151 @@ def test_uia2_rate_requires_label_anchor(monkeypatch):
     assert "label anchor" in result.message
 
 
+def test_uia2_pick_photos_refuses_without_gallery_prep(monkeypatch, tmp_path):
+    """A host path that cannot be staged (missing file) must fail before
+    any picker tap — never fall back to an arbitrary gallery tile."""
+    session, kit = _make_uia2_session(monkeypatch)
+
+    result = session.execute_action(
+        "pick_photos",
+        photos=["does-not-exist.jpg"],
+        add_selector=("~添加图",),
+    )
+
+    assert not result.success
+    # without an adb-capable driver there is no deterministic way to stage
+    # the photo — refuse instead of selecting an arbitrary gallery tile
+    assert "gallery prep failed" in result.message
+    assert kit.calls == []  # no tap happened
+
+
+class _FakeGalleryDevice:
+    """Records push/shell calls; shell() drives the index lifecycle."""
+
+    def __init__(self, name, tops_after=2):
+        self.sync = self
+        self.pushed = []
+        self.shell_calls = []
+        self._name = name
+        self._tops_after = tops_after
+
+    class _Widget:
+        exists = True
+
+        def click(self):
+            return True
+
+    def __call__(self, **kwargs):
+        # u2 widget lookup used by _pick_photo_tile
+        return self._Widget()
+
+    def push(self, local, remote):
+        self.pushed.append((local, remote))
+        self.pushed_bytes = Path(local).read_bytes()
+
+    def shell(self, args):
+        self.shell_calls.append(list(args))
+        joined = " ".join(args)
+        if "--where" in joined and self._name in joined:
+            # index lifecycle: absent → present-but-NULL → real row
+            n = len([c for c in self.shell_calls if "--where" in c])
+            if n <= self._tops_after:
+                return ""
+            if n <= self._tops_after + 1:
+                return "Row: 0 _display_name=%s, datetaken=NULL" % self._name
+            return "Row: 0 _display_name=%s, datetaken=1789859011371" % self._name
+        if "--sort" in joined and "DESC" in joined:
+            return (
+                "Row: 0 _display_name=%s, datetaken=1789859011371\n"
+                "Row: 1 _display_name=other.jpg, datetaken=1" % self._name
+            )
+        return "Broadcasting: Intent { act=MEDIA_SCANNER_SCAN_FILE }"
+
+
+def _write_jpeg(tmp_path, name="gni.jpg"):
+    from PIL import Image
+
+    path = tmp_path / name
+    Image.new("RGB", (4, 4)).save(path, "JPEG")
+    return path
+
+
+def test_uia2_pick_photos_stages_then_selects(monkeypatch, tmp_path):
+    import io
+
+    from PIL import Image
+
+    import automation_app_dianping.session as session_module
+
+    photo = _write_jpeg(tmp_path)
+    name = "IMG99999999_gni.jpg"
+    device = _FakeGalleryDevice(name)
+    kit = FakeKitUia2()
+    monkeypatch.setattr(
+        session_module, "_import_kit_uia2_session",
+        lambda: type("C", (), {"__call__": lambda self, *a, **k: kit}),
+    )
+    session = session_module.DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+
+    result = session.execute_action(
+        "pick_photos",
+        photos=[str(photo)],
+        add_selector=('uiautomator:new UiSelector().textContains("添加图")',),
+        thumbnail_selector=('uiautomator:new UiSelector().className("android.widget.ImageView")',),
+        confirm_selector=('uiautomator:new UiSelector().textContains("下一步")',),
+    )
+
+    assert result.success, result.message
+    assert len(device.pushed) == 1
+    remote = device.pushed[0][1]
+    assert remote.endswith("DCIM/Camera/" + name)
+    # staged bytes carry a current EXIF capture time; source file untouched
+    source_exif = Image.open(io.BytesIO(photo.read_bytes())).getexif()
+    staged_exif = Image.open(io.BytesIO(device.pushed_bytes)).getexif()
+    assert source_exif.get(36867) is None
+    assert staged_exif.get(36867) is not None
+    scan = [c for c in device.shell_calls if c[:1] == ["am"]][0]
+    assert "MEDIA_SCANNER_SCAN_FILE" in " ".join(scan)
+    # picker taps only happened after prep succeeded
+    assert any("添加图" in str(c) for c in kit.calls if c[0] == "tap")
+
+
+def test_uia2_pick_photos_fails_when_not_indexed_first(monkeypatch, tmp_path):
+    """Indexed but not topping the DESC order → refuse to select."""
+    import automation_app_dianping.session as session_module
+
+    photo = _write_jpeg(tmp_path, "late.jpg")
+    name = "IMG99999999_late.jpg"
+    device = _FakeGalleryDevice(name)
+    # never let the DESC probe see the target on top
+    real_shell = device.shell
+
+    def shell(args):
+        if "--sort" in " ".join(args):
+            return "Row: 0 _display_name=other.jpg, datetaken=9"
+        return real_shell(args)
+
+    device.shell = shell
+    kit = FakeKitUia2()
+    monkeypatch.setattr(
+        session_module, "_import_kit_uia2_session",
+        lambda: type("C", (), {"__call__": lambda self, *a, **k: kit}),
+    )
+    session = session_module.DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+
+    result = session.execute_action(
+        "pick_photos",
+        photos=[str(photo)],
+        add_selector=("~添加图",),
+    )
+
+    assert not result.success
+    assert "not indexed first" in result.message
+    assert kit.calls == []
+
+
 def test_uia2_manual_window_prints_guidance(monkeypatch, capsys):
     import automation_app_dianping.session as session_module
 

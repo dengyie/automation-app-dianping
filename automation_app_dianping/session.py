@@ -1037,14 +1037,27 @@ class DianpingUia2Session:
     def _pick_photos_uia2(self, **kwargs: Any) -> ActionResult:
         """Attach review photos on the 2026-09 editor.
 
-        Taps the 添加图/视频 entry, then selects the first ``len(photos)``
-        gallery thumbnails (the picker offers no path input; the caller is
-        responsible for having pushed the intended images to the front of
-        the device gallery), then confirms.
+        Each photo must be a host-side file path: it is prepared onto the
+        device gallery first (EXIF datetaken rewritten to now, pushed, media
+        scanned, indexed-first verified), because the picker offers no path
+        input and orders 最近项目 by capture time — without the rewrite the
+        pushed image sinks below camera roll shots and the first tile is a
+        random gallery photo (observed 2026-09-20). Then taps the add
+        entry, selects the first ``len(photos)`` thumbnails, and confirms.
         """
         photos = kwargs.get("photos") or []
         if not photos:
             return ActionResult(True, "pick_photos: nothing to attach")
+        prepared = []
+        for photo in photos:
+            prep = self._prepare_gallery_photo(str(photo))
+            if not prep.success:
+                return ActionResult(
+                    False,
+                    "pick_photos: gallery prep failed for %s: %s"
+                    % (photo, prep.message),
+                )
+            prepared.append(prep.data["display_name"])
         add = self._with_translated_candidates(
             "tap", {"selector": kwargs.get("add_selector")}
         )
@@ -1073,6 +1086,103 @@ class DianpingUia2Session:
             )
         return ActionResult(
             True, "pick_photos: attached %d photo(s)" % selected
+        )
+
+    _GALLERY_DIR = "/sdcard/DCIM/Camera"
+    _PUSH_PREFIX = "IMG99999999_"
+
+    def _prepare_gallery_photo(self, host_path: str) -> ActionResult:
+        """Stage one host image so the picker's first tile is exactly it.
+
+        The dianping gallery picker exposes no path input and orders tiles
+        by capture time (media provider ``datetaken``, read from EXIF).
+        Three steps make the target deterministic:
+
+        1. rewrite EXIF DateTimeOriginal/DateTime to now (a plain ``adb
+           push`` carries no EXIF, so MediaProvider indexes ``datetaken``
+           as NULL, which sorts last);
+        2. push to ``IMG99999999_<name>`` under the camera bucket and
+           trigger a single-file media scan;
+        3. poll the media index until the row appears AND its datetaken
+           tops every other image; otherwise fail instead of letting the
+           flow pick an arbitrary gallery photo.
+        """
+        device = getattr(self._session, "driver", None)
+        if device is None or not hasattr(device, "shell"):
+            return ActionResult(False, "gallery prep: no adb-capable driver")
+        source = Path(host_path)
+        if not source.is_file():
+            return ActionResult(False, "gallery prep: host file missing: %s" % host_path)
+        try:
+            import io
+
+            from PIL import Image
+        except ImportError:
+            return ActionResult(False, "gallery prep: Pillow unavailable")
+        try:
+            image = Image.open(source)
+            exif = image.getexif()
+            timestamp = time.strftime("%Y:%m:%d %H:%M:%S")
+            exif[36867] = timestamp
+            exif[306] = timestamp
+            buffer = io.BytesIO()
+            image.save(buffer, "JPEG", exif=exif, quality=85)
+        except Exception as exc:
+            return ActionResult(False, "gallery prep: EXIF rewrite failed: %s" % exc)
+
+        display_name = self._PUSH_PREFIX + source.name
+        remote = "%s/%s" % (self._GALLERY_DIR, display_name)
+        try:
+            staging = source.with_name("staged-" + display_name)
+            staging.write_bytes(buffer.getvalue())
+            device.sync.push(str(staging), remote)
+            device.shell(
+                [
+                    "am", "broadcast", "-a",
+                    "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                    "-d", "file://" + remote,
+                ]
+            )
+        except Exception as exc:
+            return ActionResult(False, "gallery prep: push/scan failed: %s" % exc)
+        finally:
+            try:
+                staging.unlink()
+            except OSError:
+                pass
+
+        deadline = time.time() + 20.0
+        while time.time() < deadline:
+            try:
+                row = device.shell(
+                    [
+                        "content", "query",
+                        "--uri", "content://media/external/images/media",
+                        "--projection", "_display_name:datetaken",
+                        "--where", "_display_name='%s'" % display_name,
+                    ]
+                ).strip()
+                if row and "datetaken=NULL" not in row:
+                    top = device.shell(
+                        [
+                            "content", "query",
+                            "--uri", "content://media/external/images/media",
+                            "--projection", "_display_name:datetaken",
+                            "--sort", "datetaken DESC",
+                        ]
+                    ).strip().splitlines()
+                    if top and display_name in top[0]:
+                        return ActionResult(
+                            True,
+                            "gallery prep: %s indexed first" % display_name,
+                            data={"display_name": display_name, "remote": remote},
+                        )
+            except Exception:
+                pass
+            time.sleep(1.0)
+        return ActionResult(
+            False,
+            "gallery prep: %s not indexed first within 20s" % display_name,
         )
 
     def _pick_photo_tile(self, thumb_selector: Any, index: int) -> ActionResult:
