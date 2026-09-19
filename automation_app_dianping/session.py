@@ -861,6 +861,8 @@ class DianpingUia2Session:
             return self._rate(**kwargs)
         if action_name == "element_bounds":
             return self._element_bounds(**kwargs)
+        if action_name in {"tap", "type_text", "wait_for_element"}:
+            return self._with_translated_candidates(action_name, kwargs)
         result = self._session.execute_action(action_name, **kwargs)
         if (
             not result.success
@@ -870,6 +872,38 @@ class DianpingUia2Session:
         ):
             result = self._retry_after_manual_window(action_name, kwargs, result)
         return result
+
+    def _with_translated_candidates(
+        self, action_name: str, kwargs: Dict[str, Any]
+    ) -> ActionResult:
+        """Run a selector action over all translated candidates in order.
+
+        SelectorValue tuples carry fallbacks (e.g. the new search bar id,
+        then ~搜索, then legacy ids); each string candidate is translated
+        into the kit ``by`` vocabulary and tried until one succeeds.
+        """
+        selector = kwargs.get("selector")
+        candidates = as_selector_list(selector) if selector is not None else []
+        errors = []
+        for candidate in candidates:
+            translated = translate_uiautomator_selector(candidate)
+            if translated is None:
+                errors.append("%s: untranslatable" % candidate)
+                continue
+            by, value = translated
+            call_kwargs = dict(kwargs)
+            call_kwargs["selector"] = value
+            call_kwargs["by"] = by
+            result = self._session.execute_action(action_name, **call_kwargs)
+            if result.success:
+                return result
+            errors.append("%s: %s" % (candidate, result.message))
+        if not candidates:
+            return self._session.execute_action(action_name, **kwargs)
+        return ActionResult(
+            False,
+            "%s failed for all selectors: %s" % (action_name, " | ".join(errors)),
+        )
 
     def _confirm_search(self, **kwargs: Any) -> ActionResult:
         selector = kwargs.get("selector")
