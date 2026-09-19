@@ -70,3 +70,22 @@
 - CI 通过 `sibling automation-kit main checkout` 有序回退到含 capability 的 kit 分支
 - 主线/正式包源含 `automation_core.capabilities` 后，应清空该 env 并只装正式版本
 - 回退失败时 CI 硬失败并指向 REQ-003，不再静默装无 capability 的 kit
+
+## REQ-004 slidex android 截图滑块求解
+
+## 背景
+- 业务场景：真机发布流中途被风控滑块拦截（2026-09-20 实测触发）
+- slidex `visual.challenge`/solve 已有 `slider_captcha` 与 `android_screenshot_bytes` 枚举与集成壳，但 `VisionContext.ANDROID_SCREENSHOT_BYTES` 在 `VisualChallengeSolver._solve_slider` 分派中落入 `unsupported_slider_context`
+
+## 需要的公共能力
+- slidex 提供纯图像求解路径：android 截图（bytes）→ 缺口 x 偏移（`gap_offset_px`，设备像素），不依赖浏览器上下文
+- 结果经 `CapabilityResult.data["gap_offset_px"]` 返回（现有 `slidex.integrations.automation_kit` 透传即可）
+
+## 为什么不能在 app 内解决
+- 缺口识别是视觉能力，属 slidex provider 域；app 仓不实现视觉算法
+
+## 验收
+- `--enable-slidex` 下真实滑块触发时，dianping session 守卫完成「截图→求解→拖动→重试动作」闭环（dianping 侧管道已于 `e44078d` 就绪，含无 solver 的确定性失败路径）
+
+## 应用侧过渡策略
+- 无 solver 或求解失败：动作确定性失败并留证（截图+page_source），提示人工处理
