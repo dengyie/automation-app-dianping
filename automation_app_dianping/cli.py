@@ -79,7 +79,19 @@ def _apply_live_env(args, env: dict) -> dict:
 
 
 def cmd_live(args) -> int:
+    from automation_app_dianping.config import DianpingDeviceConfig
     from automation_app_dianping.live import run_live
+
+    device = None
+    if args.udid or args.appium_host or args.appium_port:
+        # Without this the --udid flag was parsed but silently ignored, and a
+        # multi-device adb host would target whichever device the driver
+        # auto-picks instead of the requested one.
+        device = DianpingDeviceConfig(
+            udid=args.udid,
+            host=args.appium_host or "127.0.0.1",
+            port=args.appium_port or 4723,
+        )
 
     return _print_result(
         run_live(
@@ -91,6 +103,7 @@ def cmd_live(args) -> int:
             enable_slidex=args.enable_slidex,
             shop_name=args.shop_name,
             content=args.content,
+            device=device,
             env=_apply_live_env(args, os.environ),
             mark_published=args.mark_published,
         )
