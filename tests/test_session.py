@@ -148,10 +148,33 @@ def test_appium_driver_caps_include_coloros_workarounds():
 
 _SLIDER_PAGE = (
     '<hierarchy><node bounds="[40,800][120,880]" content-desc="滑块" class='
-    '"android.widget.ImageView"/><node content-desc="nc_1_wrapper" '
+    '"android.widget.ImageView"/><node resource-id="com.dianping.v1:id/nc_1_wrapper" '
     'class="android.view.View"/></hierarchy>'
 )
-_CLEAN_PAGE = "<hierarchy><node text='点评' class='android.widget.TextView'/></hierarchy>"
+_CLEAN_PAGE = (
+    "<hierarchy><node text='点评' class='android.widget.TextView'/>"
+    "<node class='android.webkit.WebView' text='banner slider widget'/></hierarchy>"
+)
+
+
+def test_page_source_indicates_slider():
+    from automation_app_dianping.session import page_source_indicates_slider
+
+    assert page_source_indicates_slider(_SLIDER_PAGE)
+    verify_page = (
+        "<hierarchy><node text='安全验证' class='android.widget.TextView'/></hierarchy>"
+    )
+    assert page_source_indicates_slider(verify_page)
+    # H5 copy mentioning "slider" must not trip the structural markers.
+    assert not page_source_indicates_slider(_CLEAN_PAGE)
+
+
+def test_locate_slider_handle_parses_bounds_center():
+    from automation_app_dianping.session import locate_slider_handle
+
+    assert locate_slider_handle(_SLIDER_PAGE) == (80, 840)
+    assert locate_slider_handle(_CLEAN_PAGE) is None
+    assert locate_slider_handle("not xml") is None
 
 
 class FakeSliderDriver(FakeDriver):
@@ -167,22 +190,6 @@ class FakeSliderDriver(FakeDriver):
 
     def swipe(self, start_x, start_y, end_x, end_y, duration=None):
         self.swipes.append((start_x, start_y, end_x, end_y, duration))
-
-
-def test_page_source_indicates_slider():
-    from automation_app_dianping.session import page_source_indicates_slider
-
-    assert page_source_indicates_slider(_SLIDER_PAGE)
-    assert page_source_indicates_slider("Safety verification Geetest")
-    assert not page_source_indicates_slider(_CLEAN_PAGE)
-
-
-def test_locate_slider_handle_parses_bounds_center():
-    from automation_app_dianping.session import locate_slider_handle
-
-    assert locate_slider_handle(_SLIDER_PAGE) == (80, 840)
-    assert locate_slider_handle(_CLEAN_PAGE) is None
-    assert locate_slider_handle("not xml") is None
 
 
 def test_slider_guard_solves_and_retries_action():

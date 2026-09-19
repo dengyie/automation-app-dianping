@@ -104,10 +104,29 @@ def create_appium_driver(device: DianpingDeviceConfig):
 _SLIDER_HANDLE_HINTS = ("滑块", "slider", "拖动", "handle")
 _BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 
+# Latin markers only count inside structural attributes: H5 pages carry
+# words like "slider" inside rendered copy and CSS-instrumented text, which
+# made raw-source substring matching false-positive on the review editor.
+_SLIDER_ATTR_MARKERS = ("captcha", "slider", "geetest", "nocaptcha", "nc_1")
+_SLIDER_TEXT_MARKERS = ("滑块", "拖动滑块", "向右拖动", "安全验证")
+
 
 def page_source_indicates_slider(source: str) -> bool:
-    lowered = (source or "").lower()
-    return any(marker in lowered for marker in DianpingAppiumSession._SLIDER_SOURCE_MARKERS)
+    """Attribute-level slider detection over a page source dump."""
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return False
+    for node in root.iter("node"):
+        klass = (node.get("class") or "").lower()
+        rid = (node.get("resource-id") or "").lower()
+        if any(marker in klass or marker in rid for marker in _SLIDER_ATTR_MARKERS):
+            return True
+        text = (node.get("text") or "").strip().lower()
+        desc = (node.get("content-desc") or "").strip().lower()
+        if any(marker in text or marker in desc for marker in _SLIDER_TEXT_MARKERS):
+            return True
+    return False
 
 
 def locate_slider_handle(source: str) -> Optional[Tuple[int, int]]:
@@ -158,20 +177,6 @@ def _await_in_worker_thread(awaitable: Any) -> Any:
 class DianpingAppiumSession:
     """DriverSession-compatible Appium session with multi-selector support."""
 
-    # Substrings that indicate a risk-control slider overlay in a page
-    # source. Latin markers match case-insensitively; CJK markers match
-    # verbatim. Detection is heuristic evidence, not a platform contract.
-    _SLIDER_SOURCE_MARKERS = (
-        "captcha",
-        "slider",
-        "geetest",
-        "nocaptcha",
-        "nc_1",
-        "滑块",
-        "拖动滑块",
-        "向右拖动",
-        "安全验证",
-    )
     _SLIDER_GUARDED_ACTIONS = frozenset(
         {"tap", "type_text", "confirm_search", "rate", "pick_photos"}
     )
