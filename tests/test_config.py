@@ -102,3 +102,12 @@ def test_search_input_prefers_search_page_edit_id():
 
     assert selectors.search_input[0] == "id:com.dianping.v1:id/search_keyword_edit"
     assert len(selectors.search_input) == 2
+
+
+def test_device_activity_is_current_launcher():
+    """2026-09 real device: SplashScreenActivity no longer exists; the
+    launcher activity is NovaMainActivity (verified via resolve-activity)."""
+    from automation_app_dianping.config import DianpingAppConfig, DianpingDeviceConfig
+
+    assert DianpingDeviceConfig.activity == "com.dianping.v1.NovaMainActivity"
+    assert DianpingAppConfig.activity == "com.dianping.v1.NovaMainActivity"

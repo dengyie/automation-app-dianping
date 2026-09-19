@@ -23,6 +23,15 @@ def _print_result(result) -> int:
             for a in (getattr(result, "artifacts", None) or [])
         ],
     }
+    failure = getattr(result, "failure", None)
+    if failure is not None:
+        # A swallowed failure hid session-start errors as error:null twice on
+        # real devices; always surface the runtime failure details.
+        payload["failure"] = {
+            "category": str(getattr(failure, "category", "") or ""),
+            "code": getattr(failure, "code", None),
+            "message": getattr(failure, "message", None),
+        }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload["success"] else 1
 

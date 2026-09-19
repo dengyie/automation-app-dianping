@@ -104,7 +104,9 @@ class DianpingPublishPolicy:
 @dataclass(frozen=True)
 class DianpingDeviceConfig:
     app_id: str = "com.dianping.v1"
-    activity: str = "com.dianping.main.guide.SplashScreenActivity"
+    # 2026-09 real device: the launcher activity is NovaMainActivity; the
+    # legacy SplashScreenActivity no longer exists and fails cold starts.
+    activity: str = "com.dianping.v1.NovaMainActivity"
     host: str = "127.0.0.1"
     port: int = 4723
     path: str = "/"
@@ -121,7 +123,9 @@ class DianpingDeviceConfig:
 class DianpingAppConfig:
     city: str
     app_id: str = "com.dianping.v1"
-    activity: str = "com.dianping.main.guide.SplashScreenActivity"
+    # 2026-09 real device: the launcher activity is NovaMainActivity; the
+    # legacy SplashScreenActivity no longer exists and fails cold starts.
+    activity: str = "com.dianping.v1.NovaMainActivity"
     selectors: DianpingSelectors = field(default_factory=lambda: default_selectors())
     publish: DianpingPublishPolicy = field(default_factory=DianpingPublishPolicy)
     device: DianpingDeviceConfig = field(default_factory=DianpingDeviceConfig)

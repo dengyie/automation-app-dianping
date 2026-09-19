@@ -59,3 +59,25 @@ def test_live_command_without_targeting_keeps_device_none(monkeypatch):
     cli.main(["live", "--mode", "smoke"])
 
     assert captured["device"] is None
+
+
+def test_print_result_surfaces_runtime_failure():
+    import io
+    import json
+
+    from types import SimpleNamespace
+
+    result = SimpleNamespace(
+        success=False,
+        failure=SimpleNamespace(category="INFRASTRUCTURE", code="session_start", message="boom"),
+    )
+    import contextlib
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        exit_code = cli._print_result(result)
+    payload = json.loads(buffer.getvalue())
+
+    assert exit_code == 1
+    assert payload["failure"]["code"] == "session_start"
+    assert payload["failure"]["message"] == "boom"
