@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import concurrent.futures
+import inspect
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -89,15 +94,96 @@ def create_appium_driver(device: DianpingDeviceConfig):
     return appium_webdriver.Remote(command_executor=server_url, options=options)
 
 
+_SLIDER_HANDLE_HINTS = ("滑块", "slider", "拖动", "handle")
+_BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+
+def page_source_indicates_slider(source: str) -> bool:
+    lowered = (source or "").lower()
+    return any(marker in lowered for marker in DianpingAppiumSession._SLIDER_SOURCE_MARKERS)
+
+
+def locate_slider_handle(source: str) -> Optional[Tuple[int, int]]:
+    """Best-effort slider handle position from a page source dump.
+
+    Returns the center of the first node whose text/content-desc looks like
+    a slider handle and whose bounds are parseable, else None.
+    """
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return None
+    for node in root.iter("node"):
+        text = (node.get("text") or "").strip().lower()
+        desc = (node.get("content-desc") or "").strip().lower()
+        if not any(hint in text or hint in desc for hint in _SLIDER_HANDLE_HINTS):
+            continue
+        match = _BOUNDS_RE.match(node.get("bounds") or "")
+        if match is None:
+            continue
+        x1, y1, x2, y2 = (int(part) for part in match.groups())
+        if x2 > x1 and y2 > y1:
+            return ((x1 + x2) // 2, (y1 + y2) // 2)
+    return None
+
+
+def _await_in_worker_thread(awaitable: Any) -> Any:
+    """Bridge an awaitable onto a private loop in a worker thread.
+
+    Session actions run inside the runtime's event loop; asyncio.run there
+    is illegal, so awaitable solvers execute on their own loop in a thread.
+    """
+
+    async def _await():
+        return await awaitable
+
+    def _run():
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_await())
+        finally:
+            loop.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_run).result()
+
+
 class DianpingAppiumSession:
     """DriverSession-compatible Appium session with multi-selector support."""
 
-    def __init__(self, driver: Any, *, identifier: str = "dianping-appium", artifact_root: Optional[Path] = None):
+    # Substrings that indicate a risk-control slider overlay in a page
+    # source. Latin markers match case-insensitively; CJK markers match
+    # verbatim. Detection is heuristic evidence, not a platform contract.
+    _SLIDER_SOURCE_MARKERS = (
+        "captcha",
+        "slider",
+        "geetest",
+        "nocaptcha",
+        "nc_1",
+        "滑块",
+        "拖动滑块",
+        "向右拖动",
+        "安全验证",
+    )
+    _SLIDER_GUARDED_ACTIONS = frozenset(
+        {"tap", "type_text", "confirm_search", "rate", "pick_photos"}
+    )
+
+    def __init__(
+        self,
+        driver: Any,
+        *,
+        identifier: str = "dianping-appium",
+        artifact_root: Optional[Path] = None,
+        slider_solver: Optional[Callable[[Any], Any]] = None,
+    ):
         self.driver = driver
         self.info = SessionInfo(driver_name="appium", platform="android", identifier=identifier)
         self.artifact_root = Path(artifact_root or "artifacts/dianping-live")
         self.artifact_root.mkdir(parents=True, exist_ok=True)
+        self.slider_solver = slider_solver
         self._started = False
+        self._slider_guard_active = False
 
     def start(self) -> None:
         self._started = True
@@ -144,9 +230,92 @@ class DianpingAppiumSession:
         else:
             failed = ActionResult(False, "unsupported appium action: %s" % action_name)
             result = self._maybe_fallback(action_name, kwargs, failed)
+        if result.success and action_name in self._SLIDER_GUARDED_ACTIONS:
+            result = self._guard_slider(action_name, result, kwargs)
         if not result.success:
             self._dump_failure(action_name)
         return result
+
+    def _guard_slider(self, action_name: str, result: ActionResult, kwargs: Dict[str, Any]) -> ActionResult:
+        """Detect risk-control sliders that appeared during an action.
+
+        A slider that pops up after a tap absorbs it and blocks the UI; the
+        original action must be retried once after the challenge is cleared.
+        The re-entrancy flag keeps the retry itself out of the guard.
+        """
+        if self._slider_guard_active:
+            return result
+        try:
+            source = getattr(self.driver, "page_source", "")
+        except Exception:
+            return result
+        if not isinstance(source, str) or not page_source_indicates_slider(source):
+            return result
+        self._slider_guard_active = True
+        try:
+            solve = self._attempt_slider_solve()
+            if not solve.success:
+                return ActionResult(
+                    False,
+                    "slider challenge detected during %s; %s" % (action_name, solve.message),
+                )
+            retry = self.execute_action(action_name, **kwargs)
+            if not retry.success:
+                return ActionResult(
+                    False,
+                    "slider solved but %s retry failed: %s" % (action_name, retry.message),
+                )
+            return ActionResult(True, "%s (slider solved; action retried)" % action_name)
+        finally:
+            self._slider_guard_active = False
+
+    def _attempt_slider_solve(self) -> ActionResult:
+        if self.slider_solver is None:
+            return ActionResult(
+                False,
+                "no slider solver configured; rerun with --enable-slidex "
+                "(requires slidex android_screenshot_bytes slider support)",
+            )
+        screenshot = getattr(self.driver, "get_screenshot_as_base64", None)
+        if not callable(screenshot):
+            return ActionResult(False, "driver cannot capture screenshots for slider solving")
+        try:
+            image = base64.b64decode(screenshot())
+            solution = self.slider_solver(image)
+            if inspect.isawaitable(solution):
+                solution = _await_in_worker_thread(solution)
+        except Exception as exc:
+            return ActionResult(False, "slider solve errored: %s" % exc)
+        if isinstance(solution, dict) and solution.get("gap_offset_px") is not None:
+            try:
+                offset = int(solution["gap_offset_px"])
+            except (TypeError, ValueError):
+                return ActionResult(False, "slider solver returned invalid gap_offset_px")
+        elif isinstance(solution, (int, float)) and not isinstance(solution, bool):
+            offset = int(solution)
+        else:
+            return ActionResult(False, "slider solver produced no solution")
+        if offset <= 0:
+            return ActionResult(False, "slider solver returned non-positive gap_offset_px")
+        return self._perform_slider_swipe(offset)
+
+    def _perform_slider_swipe(self, offset_px: int) -> ActionResult:
+        try:
+            source = str(getattr(self.driver, "page_source", "") or "")
+        except Exception as exc:
+            return ActionResult(False, "page source unavailable for slider handle: %s" % exc)
+        handle = locate_slider_handle(source)
+        if handle is None:
+            return ActionResult(False, "slider handle not located in page source")
+        swipe = getattr(self.driver, "swipe", None)
+        if not callable(swipe):
+            return ActionResult(False, "driver does not support coordinate swipe")
+        start_x, start_y = handle
+        try:
+            swipe(int(start_x), int(start_y), int(start_x + offset_px), int(start_y), 600)
+        except Exception as exc:
+            return ActionResult(False, "slider swipe failed: %s" % exc)
+        return ActionResult(True, "slider swiped %d px" % offset_px)
 
     def capture_artifact(self, artifact_type: str, name: str) -> ArtifactHandle:
         path = self.artifact_root / name
@@ -417,6 +586,7 @@ def build_session_factory(
     env: Optional[dict] = None,
     driver_factory: Optional[Callable[[], Any]] = None,
     driver: Optional[str] = None,
+    slider_solver: Optional[Callable[[Any], Any]] = None,
 ) -> Callable[[], Any]:
     config = device_config_from_env(env, base=device)
     source = env if env is not None else os.environ
@@ -429,7 +599,12 @@ def build_session_factory(
     def factory() -> DianpingAppiumSession:
         driver = driver_factory() if driver_factory is not None else create_appium_driver(config)
         identifier = config.udid or config.device_name or "dianping-device"
-        return DianpingAppiumSession(driver=driver, identifier=str(identifier), artifact_root=Path(config.artifact_root))
+        return DianpingAppiumSession(
+            driver=driver,
+            identifier=str(identifier),
+            artifact_root=Path(config.artifact_root),
+            slider_solver=slider_solver,
+        )
 
     return factory
 

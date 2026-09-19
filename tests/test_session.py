@@ -142,3 +142,115 @@ def test_appium_driver_caps_include_coloros_workarounds():
     assert caps["appium:ignoreHiddenApiPolicyError"] is True
     assert caps["appium:autoGrantPermissions"] is True
     assert caps["appium:automationName"] == "UiAutomator2"
+
+
+# --- slider guard -------------------------------------------------------------
+
+_SLIDER_PAGE = (
+    '<hierarchy><node bounds="[40,800][120,880]" content-desc="滑块" class='
+    '"android.widget.ImageView"/><node content-desc="nc_1_wrapper" '
+    'class="android.view.View"/></hierarchy>'
+)
+_CLEAN_PAGE = "<hierarchy><node text='点评' class='android.widget.TextView'/></hierarchy>"
+
+
+class FakeSliderDriver(FakeDriver):
+    def __init__(self):
+        super().__init__()
+        self.page_source = _SLIDER_PAGE
+        self.swipes = []
+
+    def get_screenshot_as_base64(self):
+        import base64 as _b64
+
+        return _b64.b64encode(b"img").decode("ascii")
+
+    def swipe(self, start_x, start_y, end_x, end_y, duration=None):
+        self.swipes.append((start_x, start_y, end_x, end_y, duration))
+
+
+def test_page_source_indicates_slider():
+    from automation_app_dianping.session import page_source_indicates_slider
+
+    assert page_source_indicates_slider(_SLIDER_PAGE)
+    assert page_source_indicates_slider("Safety verification Geetest")
+    assert not page_source_indicates_slider(_CLEAN_PAGE)
+
+
+def test_locate_slider_handle_parses_bounds_center():
+    from automation_app_dianping.session import locate_slider_handle
+
+    assert locate_slider_handle(_SLIDER_PAGE) == (80, 840)
+    assert locate_slider_handle(_CLEAN_PAGE) is None
+    assert locate_slider_handle("not xml") is None
+
+
+def test_slider_guard_solves_and_retries_action():
+    from automation_app_dianping.session import DianpingAppiumSession
+
+    driver = FakeSliderDriver()
+    calls = []
+
+    def solver(image_bytes):
+        calls.append(image_bytes)
+        return {"gap_offset_px": 137}
+
+    session = DianpingAppiumSession(driver, artifact_root="artifacts/test-slider", slider_solver=solver)
+
+    result = session.execute_action("tap", selector="~写评价")
+
+    assert result.success
+    assert "slider solved" in result.message
+    assert len(calls) == 1
+    assert driver.swipes == [(80, 840, 217, 840, 600)]
+
+
+def test_slider_guard_bridges_async_solver():
+    import asyncio
+
+    from automation_app_dianping.session import DianpingAppiumSession
+
+    driver = FakeSliderDriver()
+
+    async def solver(image_bytes):
+        return {"gap_offset_px": 100}
+
+    session = DianpingAppiumSession(driver, artifact_root="artifacts/test-slider", slider_solver=solver)
+
+    result = session.execute_action("tap", selector="~写评价")
+
+    assert result.success
+    assert driver.swipes == [(80, 840, 180, 840, 600)]
+
+
+def test_slider_guard_without_solver_fails_with_guidance():
+    from automation_app_dianping.session import DianpingAppiumSession
+
+    driver = FakeSliderDriver()
+    session = DianpingAppiumSession(driver, artifact_root="artifacts/test-slider")
+
+    result = session.execute_action("tap", selector="~写评价")
+
+    assert not result.success
+    assert "slider challenge detected" in result.message
+    assert "--enable-slidex" in result.message
+
+
+def test_slider_guard_skips_clean_pages():
+    from automation_app_dianping.session import DianpingAppiumSession
+
+    driver = FakeSliderDriver()
+    driver.page_source = _CLEAN_PAGE
+    calls = []
+
+    session = DianpingAppiumSession(
+        driver,
+        artifact_root="artifacts/test-slider",
+        slider_solver=lambda image: calls.append(image) or {"gap_offset_px": 10},
+    )
+
+    result = session.execute_action("tap", selector="~写评价")
+
+    assert result.success
+    assert calls == []
+    assert driver.swipes == []

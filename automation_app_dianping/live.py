@@ -40,12 +40,60 @@ def resolve_session_factory(
     session_factory: Optional[Callable[[], Any]] = None,
     device: Optional[DianpingDeviceConfig] = None,
     env: Optional[dict] = None,
+    slider_solver: Optional[Callable[[Any], Any]] = None,
 ) -> Callable[[], Any]:
     if session_factory is not None:
         return session_factory
     from automation_app_dianping.session import build_session_factory
 
-    return build_session_factory(device=device, env=env)
+    return build_session_factory(device=device, env=env, slider_solver=slider_solver)
+
+
+def _build_slider_solver(composition) -> Callable[[Any], Any]:
+    """Build the session-level slider solver on top of the visual capability.
+
+    Returns an async callable (screenshot bytes -> {"gap_offset_px": int});
+    the session bridges the awaitable onto a worker thread because actions
+    run inside the runtime event loop.
+    """
+    from automation_core.capabilities import CapabilityRequest
+    from automation_core.execution import ExecutionContext
+
+    executor = composition.capability_executor
+
+    async def solve(image_bytes: bytes):
+        request = CapabilityRequest(
+            capability="visual.challenge",
+            operation="solve",
+            parameters={
+                "challenge_type": "slider_captcha",
+                "context": "android_screenshot_bytes",
+                "image_bytes": image_bytes,
+                "provider": "auto",
+                "metadata": {},
+            },
+            metadata={},
+        )
+        context = ExecutionContext(
+            run_id="dianping-slider",
+            task_id="slider-solve",
+            workflow_name="dianping-live",
+        )
+        result = await executor.execute(request, context)
+        if not getattr(result, "success", False):
+            raise RuntimeError(
+                "slidex slider solve failed: %s"
+                % (getattr(result, "error_code", None) or "unknown")
+            )
+        data = dict(getattr(result, "data", {}) or {})
+        offset = data.get("gap_offset_px")
+        if offset is None:
+            offset = (data.get("metadata") or {}).get("gap_offset_px")
+        if offset is None:
+            raise RuntimeError("slidex slider solve returned no gap_offset_px")
+        return {"gap_offset_px": int(offset)}
+
+    return solve
 
 
 def build_live_smoke_workflow(
@@ -65,8 +113,13 @@ def build_live_smoke_workflow(
         create_workflow_from_composition,
     )
 
-    factory = resolve_session_factory(session_factory=session_factory, device=device, env=env)
     composition = build_composition(enable_slidex=enable_slidex)
+    factory = resolve_session_factory(
+        session_factory=session_factory,
+        device=device,
+        env=env,
+        slider_solver=_build_slider_solver(composition) if enable_slidex else None,
+    )
     return create_workflow_from_composition(
         composition,
         session_factory=factory,
@@ -119,8 +172,13 @@ def build_live_workflow(
             "photos": list(photos or []),
         }
 
-    factory = resolve_session_factory(session_factory=session_factory, device=device, env=env)
     composition = build_composition(enable_slidex=enable_slidex)
+    factory = resolve_session_factory(
+        session_factory=session_factory,
+        device=device,
+        env=env,
+        slider_solver=_build_slider_solver(composition) if enable_slidex else None,
+    )
     return create_workflow_from_composition(
         composition,
         session_factory=factory,
