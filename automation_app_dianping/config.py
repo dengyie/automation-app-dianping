@@ -13,9 +13,13 @@ def as_selector_list(value: SelectorValue) -> List[str]:
 @dataclass(frozen=True)
 class DianpingSelectors:
     search_bar: SelectorValue = (
+        # 2026-09 real device (OnePlus 7T, dianping 12.x): the home search
+        # bar is title_search_bar with content-desc 搜索; the legacy
+        # search_bar id stays as a fallback for older versions.
+        "id:com.dianping.v1:id/title_search_bar",
+        "~搜索",
         "id:com.dianping.v1:id/search_bar",
         'uiautomator:new UiSelector().resourceId("com.dianping.v1:id/search_bar")',
-        "~搜索",
     )
     search_input: SelectorValue = (
         'uiautomator:new UiSelector().className("android.widget.EditText")',

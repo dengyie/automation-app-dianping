@@ -70,3 +70,15 @@ def test_validate_review_content_type_errors():
     assert validate_review_content("", {"taste": 4, "environment": 4, "service": 3}) is not None
     assert validate_review_content("内容" * 60, "bad") is not None
     assert validate_review_content("内容" * 60, {"taste": 0, "environment": 4, "service": 3}) is not None
+
+
+def test_search_bar_prefers_current_version_title_bar():
+    """2026-09 real device: the home search bar id is title_search_bar."""
+    from automation_app_dianping.config import DianpingSelectors
+
+    selectors = DianpingSelectors()
+
+    assert selectors.search_bar[0] == "id:com.dianping.v1:id/title_search_bar"
+    assert "~搜索" in selectors.search_bar
+    # Legacy id stays as fallback for older app versions.
+    assert "id:com.dianping.v1:id/search_bar" in selectors.search_bar
