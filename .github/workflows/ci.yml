@@ -46,6 +46,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: dengyie/slidex
+          ref: 288f554614b7ae796724930c96bd3c1d2623f818
           path: slidex
       - uses: actions/setup-python@v5
         with:

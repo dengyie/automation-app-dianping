@@ -115,7 +115,7 @@ docs/development-log.md
 | 依赖 | 角色 | 约束 |
 | --- | --- | --- |
 | `automation-kit` | 必需平台 | 只依赖公共导出；正式消费范围 `>=0.3.0,<0.3.0` |
-| `slidex` | 可选视觉 provider | 默认非硬依赖；只在 composition root 装配 |
+| `slidex` | 可选视觉 provider | 默认非硬依赖；只在 composition root 装配。钉 `dengyie/slidex@288f554`（0.6.3）；CI `slidex-contract` 同 SHA，勿跟浮动 main |
 | 设备 / Appium / 浏览器 | live 依赖 | 默认测试与默认 CI 不得要求 |
 
 硬约束：

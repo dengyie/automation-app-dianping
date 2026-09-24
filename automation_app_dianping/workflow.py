@@ -150,7 +150,14 @@ def _ratings_from_parameters(parameters):
 
 
 def _photos_from_parameters(parameters):
-    photos = parameters.get("photos") or []
+    allow_photos = parameters.get("allow_photos")
+    if allow_photos is False:
+        return []
+    photos = parameters.get("photos", None)
+    if photos is None or photos == []:
+        from automation_app_dianping.config import default_review_photos
+
+        return default_review_photos()
     if not isinstance(photos, list):
         raise ValueError("photos must be a list")
     cleaned = []
@@ -215,15 +222,10 @@ def build_publish_steps(options, selectors):
         raise ValueError("publish mode requires parameters.content")
 
     ratings = _ratings_from_parameters(parameters)
+    # Default is the isolated DianpingAuto asset (gni2_pulled.jpg). Empty
+    # photos + allow_photos=False is the only way to publish without an
+    # image; never fall through to Camera / 最近项目 private tiles.
     photos = _photos_from_parameters(parameters)
-    allow_photos = parameters.get("allow_photos")
-    if allow_photos is None:
-        # Providing photos is itself the opt-in: a caller who passed
-        # --photos expects them attached. The explicit allow_photos flag
-        # still forces the choice either way.
-        allow_photos = bool(photos)
-    if not allow_photos:
-        photos = []
     app_id = options.app_id or DEFAULT_APP_ID
 
     steps = [
@@ -234,61 +236,31 @@ def build_publish_steps(options, selectors):
             max_attempts=3,
         ),
         WorkflowStep.artifact("screenshot", "publish-launch.png"),
+        # Cold start searches; a restored shop session (PexusPoiActivity)
+        # already shows 写评价 / 编辑评价 / 完善评价 and must not type into
+        # the shop-page 搜索栏 (live 2026-09-21: that race failed type_text).
         WorkflowStep.action(
-            "wait_for_element",
-            selector=selectors.search_bar,
-            timeout=10.0,
-        ),
-        WorkflowStep.action("tap", selector=selectors.search_bar),
-        # The search page inflates asynchronously; type_text immediately
-        # after the tap races past the input. Wait for it declaratively.
-        WorkflowStep.action(
-            "wait_for_element",
-            selector=selectors.search_input,
-            timeout=8.0,
-        ),
-        WorkflowStep.action(
-            "type_text",
-            selector=selectors.search_input,
-            text=shop_name,
-        ),
-        # Confirm search: soft button first, then ENTER keycode fallback.
-        WorkflowStep.action(
-            "confirm_search",
-            selector=getattr(selectors, "search_confirm", ("~搜索",)),
-            keycode=66,
-        ),
-        # The suggestion page rows also contain the shop name; gate on a
-        # results-page marker before matching shop entries.
-        WorkflowStep.action(
-            "wait_for_element",
-            selector=getattr(
+            "navigate_to_review_editor",
+            shop_name=shop_name,
+            write_selector=selectors.write_review,
+            search_bar=selectors.search_bar,
+            search_input=selectors.search_input,
+            search_confirm=getattr(selectors, "search_confirm", ("~搜索",)),
+            search_results_marker=getattr(
                 selectors,
                 "search_results_marker",
                 ('uiautomator:new UiSelector().text("商户")',),
             ),
-            timeout=12.0,
+            shop_result=_shop_result_selector(selectors, shop_name),
         ),
-        WorkflowStep.action(
-            "wait_for_element",
-            selector=_shop_result_selector(selectors, shop_name),
-            timeout=12.0,
-        ),
-        WorkflowStep.action(
-            "tap",
-            selector=_shop_result_selector(selectors, shop_name),
-        ),
-        WorkflowStep.action(
-            "wait_for_element",
-            selector=selectors.write_review,
-            timeout=10.0,
-        ),
-        WorkflowStep.action("tap", selector=selectors.write_review),
         WorkflowStep.action(
             "type_text",
             selector=selectors.review_input,
             text=content,
         ),
+        # type_text leaves the IME up; the overall bar (超预期) sits behind
+        # the keyboard on the 2026-09 editor (live 2026-09-21).
+        WorkflowStep.action("hide_keyboard"),
     ]
 
     if ratings:

@@ -71,9 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=None,
         metavar="PATH",
-        help="host-side image files to attach; each is staged onto the "
-        "device gallery with its EXIF capture time set to now so it is "
-        "the picker's first tile (verified before selecting)",
+        help="host-side image files to attach (default: "
+        "artifacts/gni2_pulled.jpg). Each is staged into "
+        "Pictures/DianpingAuto; the picker switches to that album "
+        "before any checkbox tap. Never selects Camera / 最近项目.",
     )
 
     prep = sub.add_parser("prepare-checklist")
@@ -185,6 +186,9 @@ def cmd_doctor(args) -> int:
 
 
 def main(argv=None) -> int:
+    from automation_app_dianping.env import load_dotenv
+
+    load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "live":

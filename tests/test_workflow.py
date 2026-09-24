@@ -165,10 +165,10 @@ def test_publish_workflow_declares_business_success_path():
     assert result.success is True
     action_names = [action.message for action in result.actions]
     assert action_names[0] == "launch_app"
+    assert "navigate_to_review_editor" in action_names
     assert "type_text" in action_names
     assert "rate" in action_names
     assert "pick_photos" in action_names
-    assert any(action.message == "wait_for_element" for action in result.actions)
 
     rate_actions = [kwargs for name, kwargs in session.actions if name == "rate"]
     assert any(item.get("dimension") == "taste" and item.get("value") == 5 for item in rate_actions)
@@ -383,13 +383,16 @@ def test_publish_steps_include_search_confirm_and_attach_photos_when_given():
         default_selectors(),
     )
     names = [step.name for step in steps if step.kind == "action"]
-    assert "confirm_search" in names
+    assert "navigate_to_review_editor" in names
+    assert "confirm_search" not in names
     assert "dismiss_dialogs" in names
     # Passing --photos is itself the opt-in: they must be attached.
     assert "pick_photos" in names
 
 
-def test_publish_steps_skip_photos_when_none_given():
+def test_publish_steps_default_to_staged_review_photo():
+    from automation_app_dianping.config import DEFAULT_REVIEW_PHOTO
+
     content = "内容足够长用于构造步骤" * 20
     steps = build_publish_steps(
         WorkflowOptions(
@@ -398,6 +401,25 @@ def test_publish_steps_skip_photos_when_none_given():
                 "shop_name": "店",
                 "content": content,
                 "ratings": {"taste": 4, "environment": 3, "service": 4},
+            }
+        ),
+        default_selectors(),
+    )
+    pick_steps = [step for step in steps if step.kind == "action" and step.name == "pick_photos"]
+    assert len(pick_steps) == 1
+    assert pick_steps[0].parameters["photos"] == [str(DEFAULT_REVIEW_PHOTO)]
+
+
+def test_publish_steps_skip_photos_when_allow_photos_false():
+    content = "内容足够长用于构造步骤" * 20
+    steps = build_publish_steps(
+        WorkflowOptions(
+            parameters={
+                "mode": "publish",
+                "shop_name": "店",
+                "content": content,
+                "ratings": {"taste": 4, "environment": 3, "service": 4},
+                "allow_photos": False,
             }
         ),
         default_selectors(),

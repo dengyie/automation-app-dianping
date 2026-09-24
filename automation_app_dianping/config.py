@@ -1,7 +1,25 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Union
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 SelectorValue = Union[str, Sequence[str]]
+
+# Canonical review photo. Staged into Pictures/DianpingAuto; never pick
+# Camera / 最近项目 tiles (those lead with private family photos).
+_PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_REVIEW_PHOTO = _PACKAGE_ROOT / "artifacts" / "gni2_pulled.jpg"
+
+
+def default_review_photos() -> List[str]:
+    """Host paths attached when publish does not pass ``photos``.
+
+    Missing file → no photos (workflow still runs); live pick_photos then
+    refuses rather than grabbing a private gallery tile.
+    """
+    if DEFAULT_REVIEW_PHOTO.is_file():
+        return [str(DEFAULT_REVIEW_PHOTO)]
+    return []
+
 
 
 def as_selector_list(value: SelectorValue) -> List[str]:
@@ -48,9 +66,18 @@ class DianpingSelectors:
         'uiautomator:new UiSelector().className("android.widget.RelativeLayout").descriptionContains("店铺")',
     )
     write_review: SelectorValue = (
+        # Same-day draft card on the shop page (2026-09-21 细记港九):
+        # 「完善评价」 continues the saved draft. Prefer it over 写评价 so
+        # we do not start a second review on top of the draft banner.
+        'uiautomator:new UiSelector().text("完善评价")',
+        'uiautomator:new UiSelector().textContains("完善评价")',
         "~写评价",
         'uiautomator:new UiSelector().text("写评价")',
+        # Same-day shop revisit opens the existing review as 编辑评价
+        # (2026-09-21 细记港九); tapping 写评价 is absent on that chrome.
+        'uiautomator:new UiSelector().text("编辑评价")',
         'uiautomator:new UiSelector().textContains("写点评")',
+        'uiautomator:new UiSelector().textContains("编辑评价")',
     )
     review_input: SelectorValue = (
         "id:com.dianping.v1:id/review_content",
@@ -62,11 +89,29 @@ class DianpingSelectors:
     add_photo: SelectorValue = (
         "~添加图/视频",
         'uiautomator:new UiSelector().textContains("添加图")',
+        'uiautomator:new UiSelector().text("添加图/视频")',
     )
+    # 2026-09 Picasso picker: 最近项目 mixes videos and photos and does
+    # not follow MediaStore datetaken (live 2026-09-21: first checkbox was
+    # a downloads lab photo). Camera tile 0 is a private family photo.
+    # Production stages into Pictures/DianpingAuto and switches album
+    # before any checkbox tap. Video thumbnails are
+    # ugc_album_item_video_thumbnail_image and have no checkbox. Photos
+    # expose ugc_album_item_select_layout. Tapping photo_imageView opens a
+    # preview sheet instead of selecting, so 下一步 can close with 0 photos.
     photo_thumbnail: SelectorValue = (
-        'uiautomator:new UiSelector().className("android.widget.ImageView")',
+        'uiautomator:new UiSelector().resourceId("com.dianping.v1:id/ugc_album_item_select_layout")',
+        'uiautomator:new UiSelector().resourceId("com.dianping.v1:id/ugc_album_item_photo_imageView")',
     )
-    photo_confirm: SelectorValue = ("~完成", 'uiautomator:new UiSelector().text("完成")')
+    # Confirm is a two-page chain: the picker uses 下一步, the dish-edit
+    # page uses 确定; 完成 stays as a fallback for older versions.
+    photo_confirm: SelectorValue = (
+        'uiautomator:new UiSelector().text("下一步")',
+        'uiautomator:new UiSelector().textContains("下一步")',
+        'uiautomator:new UiSelector().text("确定")',
+        "~完成",
+        'uiautomator:new UiSelector().text("完成")',
+    )
     submit: SelectorValue = ("~发布", 'uiautomator:new UiSelector().text("发布")')
     success: SelectorValue = (
         'uiautomator:new UiSelector().textContains("发布成功")',
@@ -95,10 +140,15 @@ class DianpingSelectors:
             2: "较差",
             3: "一般",
             4: "还可以",
-            # 2026-09 editor: the fifth overall label is 超预期 (很棒 belongs
-            # to the dimension rows' picker, not the overall bar).
-            5: "超预期",
+            # 2026-09-23 live editor (dianping 12.x): the fifth overall label
+            # is 很棒. The older 超预期 label stays as a fallback candidate
+            # for previous builds (2026-09-21 measurement).
+            5: "很棒",
         }
+    )
+    # Extra label candidates tried after the primary one for a given value.
+    rating_overall_label_fallbacks: Dict[int, Tuple[str, ...]] = field(
+        default_factory=lambda: {5: ("超预期",)}
     )
     rating_overall_star_origin_px: float = 144.0
     rating_overall_star_pitch_px: float = 176.0
@@ -113,7 +163,12 @@ class DianpingSelectors:
         label = self.rating_overall_labels.get(int(value))
         if not label:
             raise ValueError("overall rating value must be 1-5")
-        return ('uiautomator:new UiSelector().text("%s")' % label,)
+        candidates = ['uiautomator:new UiSelector().text("%s")' % label]
+        # 2026-09-23 live editor: the 5th overall label is 很棒 (the older
+        # 超预期 label belongs to a prior build / the dimension picker).
+        for fallback in self.rating_overall_label_fallbacks.get(int(value), ()):
+            candidates.append('uiautomator:new UiSelector().text("%s")' % fallback)
+        return tuple(candidates)
 
     def rating_row_label_selector(self, dimension: str) -> SelectorValue:
         labels = {"taste": "口味", "environment": "环境", "service": "服务"}
@@ -144,7 +199,11 @@ class DianpingSelectors:
         return tuple(primary)
 
     def photo_thumbnail_at(self, index: int) -> str:
-        return 'uiautomator:new UiSelector().className("android.widget.ImageView").instance(%s)' % int(index)
+        return (
+            'uiautomator:new UiSelector().resourceId('
+            '"com.dianping.v1:id/ugc_album_item_select_layout")'
+            '.instance(%s)' % int(index)
+        )
 
 
 @dataclass(frozen=True)

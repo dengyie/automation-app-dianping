@@ -94,16 +94,6 @@ def test_search_input_prefers_search_page_edit_id():
     assert len(selectors.search_input) == 2
 
 
-def test_search_input_prefers_search_page_edit_id():
-    """2026-09 real device: the search page input id is search_keyword_edit."""
-    from automation_app_dianping.config import DianpingSelectors
-
-    selectors = DianpingSelectors()
-
-    assert selectors.search_input[0] == "id:com.dianping.v1:id/search_keyword_edit"
-    assert len(selectors.search_input) == 2
-
-
 def test_device_activity_is_current_launcher():
     """2026-09 real device: SplashScreenActivity no longer exists; the
     launcher activity is NovaMainActivity (verified via resolve-activity)."""
@@ -122,3 +112,44 @@ def test_search_confirm_prefers_results_button_and_marker_exists():
 
     assert selectors.search_confirm[0] == "id:com.dianping.v1:id/search_button"
     assert any("SearchPagerViewPager" in c for c in selectors.search_results_marker)
+
+
+def test_write_review_includes_same_day_edit_label():
+    """Same-day shop revisit replaces 写评价 with 编辑评价 / 完善评价."""
+    from automation_app_dianping.config import DianpingSelectors
+
+    selectors = DianpingSelectors()
+    joined = " ".join(selectors.write_review)
+    assert "完善评价" in selectors.write_review[0]
+    assert "写评价" in joined
+    assert "编辑评价" in joined
+
+
+def test_default_review_photos_points_at_staged_noodle():
+    from automation_app_dianping.config import (
+        DEFAULT_REVIEW_PHOTO,
+        default_review_photos,
+    )
+
+    assert DEFAULT_REVIEW_PHOTO.name == "gni2_pulled.jpg"
+    photos = default_review_photos()
+    assert photos == [str(DEFAULT_REVIEW_PHOTO)]
+    assert DEFAULT_REVIEW_PHOTO.is_file()
+
+
+def test_photo_selectors_target_photo_tiles_and_two_page_confirm():
+    """2026-09 picker: select via checkbox (select_layout) after switching
+    to DianpingAuto. photo_imageView is preview-only. Confirm is 下一步 then 确定."""
+    from automation_app_dianping.config import DianpingSelectors
+
+    selectors = DianpingSelectors()
+
+    assert "ugc_album_item_select_layout" in selectors.photo_thumbnail[0]
+    assert any("ugc_album_item_photo_imageView" in c for c in selectors.photo_thumbnail)
+    assert not any("className" in c for c in selectors.photo_thumbnail)
+    assert "下一步" in selectors.photo_confirm[0]
+    assert any('text("确定")' in c for c in selectors.photo_confirm)
+    assert any('text("添加图/视频")' in c for c in selectors.add_photo)
+    at = selectors.photo_thumbnail_at(3)
+    assert "ugc_album_item_select_layout" in at
+    assert "instance(3)" in at

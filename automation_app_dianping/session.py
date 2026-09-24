@@ -6,6 +6,7 @@ import asyncio
 import base64
 import concurrent.futures
 import inspect
+import io
 import os
 import re
 import time
@@ -16,6 +17,80 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 from automation_core.drivers import ActionResult, ArtifactHandle, SessionInfo
 
 from automation_app_dianping.config import DianpingDeviceConfig, as_selector_list
+
+
+class ActionParameterError(ValueError):
+    """A workflow action carried a parameter the driver cannot honour.
+
+    Raised instead of letting a bare ``float()``/``int()`` raise, so the
+    surfaced error names the parameter instead of only the action. Callers
+    that want a soft failure return an ``ActionResult``; this is for the
+    coercion points where a raw ``ValueError`` used to escape the session.
+    """
+
+
+def _coerce_number(
+    name: str,
+    raw: Any,
+    default: Any,
+    *,
+    cast: Callable[[Any], Any] = float,
+    minimum: Optional[float] = None,
+) -> Any:
+    """Coerce a numeric parameter, naming it in the error when it is garbage.
+
+    An explicit ``None`` falls back to ``default`` because the workflow
+    templates emit keys with null values for omitted knobs.
+    """
+    if raw is None:
+        raw = default
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        raise ActionParameterError("%s must be a number, got %r" % (name, raw))
+    if minimum is not None and value < minimum:
+        raise ActionParameterError(
+            "%s must be >= %s, got %r" % (name, minimum, value)
+        )
+    return value
+
+
+def _numeric_parameter(
+    kwargs: Dict[str, Any],
+    name: str,
+    default: Any,
+    *,
+    cast: Callable[[Any], Any] = float,
+    minimum: Optional[float] = None,
+) -> Any:
+    """Read a numeric action parameter out of the step's kwargs."""
+    return _coerce_number(
+        name, kwargs.get(name, default), default, cast=cast, minimum=minimum
+    )
+
+
+_SWALLOW_LOG_INTERVAL_SECONDS = 10.0
+_SWALLOW_LOG_LAST: Dict[str, float] = {}
+
+
+def _log_swallowed(label: str, exc: Exception) -> None:
+    """Best-effort helpers must stay silent to the caller, but a failure that
+    made the session act blind is still worth a line on the console so a live
+    run is not diagnosed from a blank page source.
+
+    Repeated calls are throttled: a persistent device fault makes every
+    hierarchy poll raise, and without dedupe a broken run would spam one line
+    per poll.
+    """
+    now = time.time()
+    if now - _SWALLOW_LOG_LAST.get(label, -_SWALLOW_LOG_INTERVAL_SECONDS) < _SWALLOW_LOG_INTERVAL_SECONDS:
+        return
+    _SWALLOW_LOG_LAST[label] = now
+    print(
+        "[dianping] %s: swallowed %s: %s"
+        % (label, type(exc).__name__, exc),
+        flush=True,
+    )
 
 
 class _ByStrings:
@@ -174,11 +249,79 @@ def _await_in_worker_thread(awaitable: Any) -> Any:
         return pool.submit(_run).result()
 
 
+def _slider_solution_params(
+    solution: Any,
+) -> Tuple[Optional[Dict[str, Any]], Optional[ActionResult]]:
+    """Validate a slider solver result into swipe parameters.
+
+    slidex's pure-image path reports the gap's left edge in screenshot pixels
+    (``gap_x`` / ``distance_px``); older providers reported a ready-made drag
+    distance (``gap_offset_px``). Either may carry ``distance_scale`` when the
+    screenshot is rendered smaller than device pixels. A bare number is the
+    legacy ready-made-distance shape.
+    """
+    if isinstance(solution, (int, float)) and not isinstance(solution, bool):
+        solution = {"gap_offset_px": int(solution)}
+    if not isinstance(solution, dict):
+        return None, ActionResult(False, "slider solver produced no solution")
+    gap_x = solution.get("gap_x")
+    offset = solution.get("gap_offset_px")
+    if gap_x is None and offset is None:
+        return None, ActionResult(False, "slider solver produced no solution")
+    try:
+        scale = float(solution.get("distance_scale", 1.0))
+    except (TypeError, ValueError):
+        return None, ActionResult(False, "slider solver returned invalid distance_scale")
+    if scale <= 0:
+        return None, ActionResult(False, "slider solver returned non-positive distance_scale")
+    return {"gap_x": gap_x, "offset_px": offset, "scale": scale}, None
+
+
+def _slider_drag_distance(
+    start_x: int, gap_x: Any, offset_px: Any, scale: float
+) -> Tuple[Optional[int], Optional[ActionResult]]:
+    """Compute the horizontal drag distance for a located slider handle.
+
+    ``gap_x`` is the gap's absolute left edge and the handle starts on the
+    piece, so the drag is the gap x minus the handle's own start x. ``offset_px``
+    is already a drag distance. Both are multiplied by ``scale``.
+    """
+    if gap_x is not None:
+        try:
+            target = float(gap_x)
+        except (TypeError, ValueError):
+            return None, ActionResult(False, "slider solver returned invalid gap_x")
+        if target <= 0:
+            return None, ActionResult(False, "slider solver returned non-positive gap_x")
+        distance = int(round((target - start_x) * scale))
+        if distance <= 0:
+            return None, ActionResult(
+                False,
+                "slider gap at x=%s is at or left of handle x=%s" % (target, start_x),
+            )
+        return distance, None
+    try:
+        distance = int(round(float(offset_px) * scale))
+    except (TypeError, ValueError):
+        return None, ActionResult(False, "slider solver returned invalid gap_offset_px")
+    if distance <= 0:
+        return None, ActionResult(False, "slider solver returned non-positive gap_offset_px")
+    return distance, None
+
+
 class DianpingAppiumSession:
     """DriverSession-compatible Appium session with multi-selector support."""
 
     _SLIDER_GUARDED_ACTIONS = frozenset(
-        {"tap", "type_text", "wait_for_element", "confirm_search", "rate", "pick_photos"}
+        {
+            "tap",
+            "type_text",
+            "wait_for_element",
+            "confirm_search",
+            "navigate_to_review_editor",
+            "rate",
+            "pick_photos",
+        }
     )
 
     def __init__(
@@ -199,7 +342,9 @@ class DianpingAppiumSession:
         # accessibility nodes, so they are invisible to page-source detection;
         # the manual window keeps retrying a blocked action while a human
         # solves the challenge on the device.
-        self.captcha_window_seconds = float(captcha_window_seconds)
+        self.captcha_window_seconds = _coerce_number(
+            "captcha_window_seconds", captcha_window_seconds, 0.0, minimum=0.0
+        )
         self._started = False
         self._slider_guard_active = False
         self._manual_window_active = False
@@ -243,6 +388,21 @@ class DianpingAppiumSession:
         return result
 
     def _run_action(self, action_name: str, kwargs: Dict[str, Any]) -> ActionResult:
+        """Dispatch one action, turning a bad parameter into a reported failure.
+
+        A parameter error short-circuits the slider guard and the manual
+        captcha window: retrying a tap with an unparseable timeout would only
+        re-raise for the whole window.
+        """
+        try:
+            return self._run_named_action(action_name, kwargs)
+        except ActionParameterError as exc:
+            result = ActionResult(False, "%s: %s" % (action_name, exc))
+            print("[dianping] failure detail: %s" % result.message[:400], flush=True)
+            self._dump_failure(action_name)
+            return result
+
+    def _run_named_action(self, action_name: str, kwargs: Dict[str, Any]) -> ActionResult:
         if action_name == "rate":
             result = self._rate(**kwargs)
         elif action_name == "pick_photos":
@@ -251,6 +411,10 @@ class DianpingAppiumSession:
             result = self._launch_app(**kwargs)
         elif action_name == "confirm_search":
             result = self._confirm_search(**kwargs)
+        elif action_name == "navigate_to_review_editor":
+            result = self._navigate_to_review_editor(**kwargs)
+        elif action_name == "hide_keyboard":
+            result = self._hide_keyboard(**kwargs)
         elif action_name == "dismiss_dialogs":
             result = self._dismiss_dialogs(**kwargs)
         elif action_name == "press_keycode":
@@ -310,7 +474,8 @@ class DianpingAppiumSession:
             return result
         try:
             source = getattr(self.driver, "page_source", "")
-        except Exception:
+        except Exception as exc:
+            _log_swallowed("slider guard page source", exc)
             return result
         if not isinstance(source, str) or not page_source_indicates_slider(source):
             return result
@@ -349,20 +514,19 @@ class DianpingAppiumSession:
                 solution = _await_in_worker_thread(solution)
         except Exception as exc:
             return ActionResult(False, "slider solve errored: %s" % exc)
-        if isinstance(solution, dict) and solution.get("gap_offset_px") is not None:
-            try:
-                offset = int(solution["gap_offset_px"])
-            except (TypeError, ValueError):
-                return ActionResult(False, "slider solver returned invalid gap_offset_px")
-        elif isinstance(solution, (int, float)) and not isinstance(solution, bool):
-            offset = int(solution)
-        else:
-            return ActionResult(False, "slider solver produced no solution")
-        if offset <= 0:
-            return ActionResult(False, "slider solver returned non-positive gap_offset_px")
-        return self._perform_slider_swipe(offset)
 
-    def _perform_slider_swipe(self, offset_px: int) -> ActionResult:
+        params, error = _slider_solution_params(solution)
+        if error is not None:
+            return error
+        return self._perform_slider_swipe(**params)
+
+    def _perform_slider_swipe(
+        self,
+        *,
+        gap_x: Any = None,
+        offset_px: Any = None,
+        scale: float = 1.0,
+    ) -> ActionResult:
         try:
             source = str(getattr(self.driver, "page_source", "") or "")
         except Exception as exc:
@@ -373,12 +537,15 @@ class DianpingAppiumSession:
         swipe = getattr(self.driver, "swipe", None)
         if not callable(swipe):
             return ActionResult(False, "driver does not support coordinate swipe")
+        distance, error = _slider_drag_distance(handle[0], gap_x, offset_px, scale)
+        if error is not None:
+            return error
         start_x, start_y = handle
         try:
-            swipe(int(start_x), int(start_y), int(start_x + offset_px), int(start_y), 600)
+            swipe(int(start_x), int(start_y), int(start_x + distance), int(start_y), 600)
         except Exception as exc:
             return ActionResult(False, "slider swipe failed: %s" % exc)
-        return ActionResult(True, "slider swiped %d px" % offset_px)
+        return ActionResult(True, "slider swiped %d px" % distance)
 
     def capture_artifact(self, artifact_type: str, name: str) -> ArtifactHandle:
         path = self.artifact_root / name
@@ -431,6 +598,18 @@ class DianpingAppiumSession:
         selector = kwargs.get("selector") or kwargs.get("fallback_selector")
         if selector is None:
             return ActionResult(False, "rate requires selector")
+        source = ""
+        try:
+            raw = getattr(self.driver, "page_source", "")
+            source = raw if isinstance(raw, str) else ""
+        except Exception:
+            source = ""
+        if should_skip_rating(source):
+            return ActionResult(
+                True,
+                "rate skipped; overall bar not on overwrite chrome",
+                data={"dimension": kwargs.get("dimension"), "value": kwargs.get("value")},
+            )
         anchor = kwargs.get("anchor")
         if anchor in {"overall", "dimension_row"}:
             result = self._rate_by_label_anchor(selector, anchor, kwargs.get("value"))
@@ -450,6 +629,27 @@ class DianpingAppiumSession:
             )
         return self._maybe_fallback("rate", kwargs, result)
 
+    def _display_width_px(self) -> Optional[int]:
+        """Device display width for scaling pixel geometry.
+
+        None when the driver cannot report it (offline fakes), which keeps
+        the 1080px reference constants unscaled.
+        """
+        size = getattr(self.driver, "get_window_size", None)
+        if not callable(size):
+            return None
+        try:
+            value = size()
+        except Exception:
+            return None
+        if not isinstance(value, dict):
+            return None
+        width = value.get("width")
+        try:
+            return int(width) if width else None
+        except (TypeError, ValueError):
+            return None
+
     def _rate_by_label_anchor(self, selector: Any, anchor: str, value: Any) -> ActionResult:
         """Tap a rating star by anchoring on its text label.
 
@@ -467,6 +667,8 @@ class DianpingAppiumSession:
         if not 1 <= numeric_value <= 5:
             return ActionResult(False, "rating value must be 1-5")
         selectors = default_selectors()
+        width = self._display_width_px()
+        scale = (width / _GEOMETRY_REFERENCE_WIDTH_PX) if width else 1.0
         candidates = as_selector_list(selector) if selector is not None else []
         errors = []
         for candidate in candidates:
@@ -482,15 +684,15 @@ class DianpingAppiumSession:
                     selectors.rating_overall_star_origin_px
                     + selectors.rating_overall_star_pitch_px * (numeric_value - 1)
                     + selectors.rating_star_tap_fraction * selectors.rating_star_width_px
-                )
-                y = rect["y"] + rect["height"] + selectors.rating_overall_star_gap_px
+                ) * scale
+                y = rect["y"] + rect["height"] + selectors.rating_overall_star_gap_px * scale
             else:
                 # Measured 2026-09 strip: first star centre 236, pitch 144 —
                 # tap star centres, no width fraction.
                 x = (
                     selectors.rating_dim_star_origin_px
                     + selectors.rating_dim_star_pitch_px * (numeric_value - 1)
-                )
+                ) * scale
                 y = rect["y"] + rect["height"] / 2
             swipe = getattr(self.driver, "swipe", None)
             if not callable(swipe):
@@ -549,6 +751,150 @@ class DianpingAppiumSession:
             ActionResult(False, "pick_photos expanded"),
         )
 
+    def _navigate_to_review_editor(self, **kwargs: Any) -> ActionResult:
+        """Open the review editor from home search or a restored shop page."""
+        shop_name = str(kwargs.get("shop_name") or "")
+        write_selector = kwargs.get("write_selector")
+        source = ""
+        try:
+            raw = getattr(self.driver, "page_source", "")
+            source = raw if isinstance(raw, str) else ""
+        except Exception:
+            source = ""
+        if dish_edit_is_open(source):
+            return ActionResult(True, "navigate_to_review_editor already in dish-edit")
+        if review_editor_is_open(source):
+            return ActionResult(True, "navigate_to_review_editor already in review editor")
+        if shop_page_has_review_entry(source, shop_name):
+            wait = self._with_selector_fallbacks(
+                "wait_for_element",
+                {"selector": write_selector, "timeout": 4.0},
+            )
+            if wait.success:
+                tap = self._with_selector_fallbacks("tap", {"selector": write_selector})
+                if tap.success:
+                    return ActionResult(
+                        True, "navigate_to_review_editor via restored shop page"
+                    )
+                return tap
+        search_bar = kwargs.get("search_bar")
+        search_input = kwargs.get("search_input")
+        wait = self._with_selector_fallbacks(
+            "wait_for_element",
+            {"selector": search_bar, "timeout": 10.0},
+        )
+        if not wait.success:
+            return wait
+        tap = self._with_selector_fallbacks("tap", {"selector": search_bar})
+        if not tap.success:
+            return tap
+        wait = self._with_selector_fallbacks(
+            "wait_for_element",
+            {"selector": search_input, "timeout": 8.0},
+        )
+        if not wait.success:
+            return wait
+        typed = self._with_selector_fallbacks(
+            "type_text",
+            {"selector": search_input, "text": shop_name},
+        )
+        if not typed.success:
+            return typed
+        confirmed = self._confirm_search(
+            selector=kwargs.get("search_confirm"),
+            keycode=66,
+        )
+        if not confirmed.success:
+            return confirmed
+        wait = self._with_selector_fallbacks(
+            "wait_for_element",
+            {"selector": kwargs.get("search_results_marker"), "timeout": 12.0},
+        )
+        if not wait.success:
+            return wait
+        shop_result = shop_result_candidates(shop_name, kwargs.get("shop_result"))
+        wait = self._with_selector_fallbacks(
+            "wait_for_element",
+            {"selector": shop_result, "timeout": 12.0},
+        )
+        if not wait.success:
+            return wait
+        tap = self._with_selector_fallbacks("tap", {"selector": shop_result})
+        if not tap.success:
+            return tap
+        wait = self._with_selector_fallbacks(
+            "wait_for_element",
+            {"selector": write_selector, "timeout": 10.0},
+        )
+        if not wait.success:
+            return wait
+        tap = self._with_selector_fallbacks("tap", {"selector": write_selector})
+        if not tap.success:
+            return tap
+        # The write CTA tap reports success even when the editor never opens
+        # (live 2026-09-23: the shop page can stall on a notice), so require
+        # an editor marker before declaring the navigation done.
+        opened = self._with_selector_fallbacks(
+            "wait_for_element",
+            {
+                "selector": (
+                    'uiautomator:new UiSelector().textContains("添加图")',
+                    'uiautomator:new UiSelector().text("发布")',
+                ),
+                "timeout": _EDITOR_OPEN_TIMEOUT_SECONDS,
+            },
+        )
+        if not opened.success:
+            return ActionResult(
+                False, "navigate_to_review_editor: write tap did not open the editor"
+            )
+        return ActionResult(True, "navigate_to_review_editor via search")
+
+    def _hide_keyboard(self, **kwargs: Any) -> ActionResult:
+        """Dismiss the IME so the overall rating bar is visible.
+
+        2026-09-21 editor: type_text leaves the keyboard covering 超预期.
+        Prefer the Picasso toolbar 「完成」; fall back to BACK.
+        Do not BACK once 发布 is already on screen — that leaves the editor.
+        """
+        source = ""
+        try:
+            raw = getattr(self.driver, "page_source", "")
+            source = raw if isinstance(raw, str) else ""
+        except Exception:
+            source = ""
+        if dish_edit_is_open(source) or (
+            review_publish_chrome_visible(source) and not review_ime_toolbar_visible(source)
+        ):
+            return ActionResult(True, "hide_keyboard skipped; editor chrome visible")
+        tap = self._with_selector_fallbacks(
+            "tap",
+            {
+                "selector": (
+                    'uiautomator:new UiSelector().text("完成")',
+                    "~完成",
+                ),
+                "timeout": 2.0,
+            },
+        )
+        if tap.success:
+            return ActionResult(True, "hide_keyboard via 完成")
+        press = getattr(self.driver, "press_keycode", None)
+        if callable(press):
+            try:
+                press(4)
+                return ActionResult(True, "hide_keyboard via BACK")
+            except Exception as exc:
+                return ActionResult(False, "hide_keyboard BACK failed: %s" % exc)
+        hide = getattr(self.driver, "hide_keyboard", None)
+        if callable(hide):
+            try:
+                hide()
+                return ActionResult(True, "hide_keyboard via driver")
+            except Exception as exc:
+                return ActionResult(False, "hide_keyboard failed: %s" % exc)
+        return ActionResult(True, "hide_keyboard skipped")
+
     def _launch_app(self, **kwargs: Any) -> ActionResult:
         app_id = kwargs.get("app_id")
         if not app_id:
@@ -558,8 +904,10 @@ class DianpingAppiumSession:
             return ActionResult(False, "driver does not support app launch")
         try:
             activate(app_id)
-            time.sleep(float(kwargs.get("settle_seconds", 2.0)))
+            time.sleep(_numeric_parameter(kwargs, "settle_seconds", 2.0, minimum=0.0))
             return ActionResult(True, "launch_app")
+        except ActionParameterError as exc:
+            return ActionResult(False, str(exc))
         except Exception as exc:
             return ActionResult(False, "launch_app failed: %s" % exc)
 
@@ -570,7 +918,9 @@ class DianpingAppiumSession:
             candidates = [selector]
         if not candidates:
             return ActionResult(False, "missing required parameter: selector")
-        timeout = float(kwargs.get("timeout", 8.0 if action_name == "wait_for_element" else 5.0))
+        timeout = _numeric_parameter(
+            kwargs, "timeout", 8.0 if action_name == "wait_for_element" else 5.0, minimum=0.0
+        )
         errors = []
         for candidate in candidates:
             try:
@@ -673,12 +1023,15 @@ class DianpingAppiumSession:
 
     def _dismiss_dialogs(self, **kwargs: Any) -> ActionResult:
         selector = kwargs.get("selector")
-        max_attempts = int(kwargs.get("max_attempts", 3) or 3)
+        max_attempts = _numeric_parameter(kwargs, "max_attempts", 3, cast=int, minimum=1)
         dismissed = 0
-        for _ in range(max(max_attempts, 1)):
+        for _ in range(max_attempts):
             result = self._with_selector_fallbacks(
                 "tap",
-                {"selector": selector, "timeout": float(kwargs.get("timeout", 1.0))},
+                {
+                    "selector": selector,
+                    "timeout": _numeric_parameter(kwargs, "timeout", 1.0, minimum=0.0),
+                },
             )
             if not result.success:
                 break
@@ -730,9 +1083,11 @@ def build_session_factory(
 ) -> Callable[[], Any]:
     config = device_config_from_env(env, base=device)
     source = env if env is not None else os.environ
-    selected = str(driver or source.get("DIANPING_DRIVER") or "appium").strip().lower()
+    # uia2 is the production driver (README); Appium remains an opt-in path
+    # for local experiments, never the silent default.
+    selected = str(driver or source.get("DIANPING_DRIVER") or "uia2").strip().lower()
     if selected == "uia2":
-        return build_uia2_session_factory(config)
+        return build_uia2_session_factory(config, slider_solver=slider_solver)
     if selected != "appium":
         raise ValueError("unsupported dianping driver: %s" % selected)
 
@@ -765,6 +1120,639 @@ _UIA2_METHOD_MAP = {
 }
 
 _UIA2_METHOD_RE = re.compile(r'\.(\w+)\(\s*"([^"]*)"\s*\)')
+
+_PHOTO_IMAGE_RESOURCE_ID = "com.dianping.v1:id/ugc_album_item_photo_imageView"
+_PHOTO_SELECT_RESOURCE_ID = "com.dianping.v1:id/ugc_album_item_select_layout"
+_PHOTO_SELECT_BADGE_RESOURCE_ID = "com.dianping.v1:id/ugc_album_item_select"
+# Leftover same-day thumbnails to clear before attaching. The cap keeps a
+# mis-detected element from turning the cleanup into an unbounded delete loop.
+_MAX_EDITOR_PHOTO_CLEARS = 6
+# How long to wait for the review editor after tapping the 写评价 CTA.
+_EDITOR_OPEN_TIMEOUT_SECONDS = 6.0
+
+
+def _shell_text(result: Any) -> str:
+    """Normalize uiautomator2 ``ShellResponse`` / str / bytes into stripped text.
+
+    ``Device.shell`` returns a NamedTuple ``(output, exit_code)`` with no
+    ``strip``; calling ``.strip()`` on it raises AttributeError and the
+    gallery-prep poll would then spin until the 20s deadline.
+    """
+    if result is None:
+        return ""
+    output = getattr(result, "output", None)
+    if output is None:
+        output = result[0] if isinstance(result, tuple) and result else result
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", errors="replace")
+    return str(output).strip()
+
+
+def _media_field(row: str, field: str) -> str:
+    """Parse ``field=...`` from a ``content query`` row."""
+    marker = "%s=" % field
+    if marker not in row:
+        return ""
+    return row.split(marker, 1)[1].split(",", 1)[0].strip()
+
+
+def _media_display_name(row: str) -> str:
+    """Parse ``_display_name=...`` from a ``content query`` row."""
+    return _media_field(row, "_display_name")
+
+
+def _picker_header_album(source: str) -> Optional[str]:
+    """Album title in the Picasso picker chrome (y ~ 103), not the dropdown list.
+
+    2026-09 live: the header 「最近项目」 sits at ``[430,103][610,156]``. Dropdown
+    rows (Camera, downloads, …) start at y>=192, so a y<200 cut keeps the
+    title distinct from the list. Clock / status bar nodes sit above y=68.
+    """
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return None
+    skip = {"全部", "照片", "视频", "相册", "拍摄", "下一步", "确定", "完成"}
+    for node in root.iter("node"):
+        text = (node.get("text") or "").strip()
+        if not text or text in skip or text.isdigit():
+            continue
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is None:
+            continue
+        if 68 <= rect["y"] < 200 and rect["height"] < 120:
+            return text
+    return None
+
+
+def _bounds_rect(bounds: str) -> Optional[Dict[str, int]]:
+    match = _BOUNDS_RE.match(bounds or "")
+    if match is None:
+        return None
+    x1, y1, x2, y2 = (int(part) for part in match.groups())
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
+
+
+_EDITOR_PHOTO_SKIP_LABELS = ("添加图", "说评价", "发布", "取消", "存草稿")
+
+
+def editor_attached_photo_rects(source: str) -> List[Dict[str, int]]:
+    """Clickable editor thumbnails that already have a numbered badge.
+
+    2026-09-21 Picasso editor: leftover same-day review photos are
+    clickable FrameLayouts in the photo row (y ~1087–1340 on 1080×2400)
+    with a digit TextView overlay. The add card (添加图/视频) and voice
+    card (说评价) sit in the same row and must not be treated as
+    attached. The wrapping row FrameLayout is also clickable and is
+    skipped because it is far wider than a thumbnail.
+    """
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return []
+    parent_of: Dict[ET.Element, ET.Element] = {}
+    for node in root.iter():
+        for child in list(node):
+            parent_of[child] = node
+
+    def nearest_clickable(node: ET.Element) -> Optional[ET.Element]:
+        current: Optional[ET.Element] = node
+        while current is not None:
+            if (current.get("clickable") or "").lower() == "true":
+                return current
+            current = parent_of.get(current)
+        return None
+
+    def subtree_labels(node: ET.Element) -> str:
+        parts = []
+        for child in node.iter("node"):
+            parts.append(child.get("text") or "")
+            parts.append(child.get("content-desc") or "")
+        return "".join(parts)
+
+    seen = set()
+    rects: List[Dict[str, int]] = []
+    for node in root.iter("node"):
+        text = (node.get("text") or "").strip()
+        if not text.isdigit():
+            continue
+        host = nearest_clickable(node)
+        if host is None:
+            continue
+        labels = subtree_labels(host)
+        if any(skip in labels for skip in _EDITOR_PHOTO_SKIP_LABELS):
+            continue
+        rect = _bounds_rect(host.get("bounds") or "")
+        if rect is None:
+            continue
+        if not (80 <= rect["width"] <= 400 and 80 <= rect["height"] <= 400):
+            continue
+        if not (400 <= rect["y"] <= 2000):
+            continue
+        key = (rect["x"], rect["y"], rect["width"], rect["height"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rects.append(rect)
+    rects.sort(key=lambda item: item["x"])
+    return rects
+
+
+def _node_matches_selector(node: ET.Element, by: str, value: str) -> bool:
+    text = node.get("text") or ""
+    desc = node.get("content-desc") or ""
+    rid = node.get("resource-id") or ""
+    cls = node.get("class") or ""
+    if by == "text":
+        return text == value
+    if by == "text-contains":
+        return value in text
+    if by == "description":
+        return desc == value
+    if by == "description-contains":
+        return value in desc
+    if by == "id":
+        return rid == value
+    if by == "class":
+        return cls == value
+    return False
+
+
+def clickable_ancestor_rect(
+    source: str, by: str, value: str
+) -> Optional[Dict[str, int]]:
+    """Nearest clickable ancestor of a Picasso chrome label.
+
+    2026-09 Picasso chrome: 「写评价」, 「添加图/视频」, 「下一步」 and
+    「确定」 are non-clickable TextViews. Their parent FrameLayout is the
+    real target.
+    """
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return None
+    target = None
+    for node in root.iter("node"):
+        if _node_matches_selector(node, by, value):
+            target = node
+            break
+    if target is None:
+        return None
+    parent_of = {}
+    for node in root.iter():
+        for child in list(node):
+            parent_of[child] = node
+    current: Optional[ET.Element] = target
+    while current is not None:
+        if (current.get("clickable") or "").lower() == "true":
+            rect = _bounds_rect(current.get("bounds") or "")
+            if rect is not None:
+                return rect
+        current = parent_of.get(current)
+    return _bounds_rect(target.get("bounds") or "")
+
+
+def preferred_tap_rect(
+    source: str, by: str, value: str
+) -> Optional[Dict[str, int]]:
+    """Tap target for Picasso labels, shrinking oversized card ancestors.
+
+    2026-09-21 shop draft card: 「完善评价」 is a non-clickable TextView
+    whose nearest clickable ancestor is the full-width card
+    ``[0,1447][1080,1664]``. The card centre misses the orange button;
+    tap the label bounds instead when the ancestor is far larger.
+    """
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return clickable_ancestor_rect(source, by, value)
+    target = None
+    for node in root.iter("node"):
+        if _node_matches_selector(node, by, value):
+            target = node
+            break
+    if target is None:
+        return None
+    label = _bounds_rect(target.get("bounds") or "")
+    ancestor = clickable_ancestor_rect(source, by, value)
+    if label is None:
+        return ancestor
+    if ancestor is None:
+        return label
+    if label["width"] >= 400:
+        # A wide label is a control surface in its own right (the home search
+        # bar spans [25,186][1055,286]). Its padded app-bar ancestor starts at
+        # the status bar, so the ancestor centre lands on dead chrome and the
+        # gesture is swallowed (live 2026-09-23).
+        return label
+    too_wide = ancestor["width"] > max(700, label["width"] * 2)
+    too_tall = ancestor["height"] > max(400, label["height"] * 3)
+    if too_wide or too_tall:
+        return label
+    return ancestor
+
+
+def shop_result_candidates(shop_name: str, configured: Any) -> Tuple[str, ...]:
+    """Search-result row locators, name-anchored first.
+
+    2026-09-23 live: this build renders a search-result row as a clickable
+    card around the shop-name TextView; no node carries the configured
+    「店铺」 description, and the card centre lands on a deal tile. Anchoring
+    on the shop name text keeps the wait and the tap on the row header.
+    """
+    candidates: List[str] = []
+    name = str(shop_name or "").strip()
+    if name:
+        candidates.append('uiautomator:new UiSelector().textContains("%s")' % name)
+    if configured is not None:
+        candidates.extend(as_selector_list(configured))
+    return tuple(candidates)
+
+
+# Resource-id fragments that mark the search toolbar instead of a result row.
+_SEARCH_HEADER_RID_TOKENS = ("search_header", "search_view", "search_keyword")
+
+
+def shop_row_tap_rect(source: str, shop_name: str) -> Optional[Dict[str, int]]:
+    """Tap target for the search-result row, never the header query box.
+
+    The results page keeps the typed query in its search header, so a plain
+    ``textContains(shop_name)`` matches the toolbar before any result row and
+    the tap reopens the suggestion page (live 2026-09-23). Skip every match
+    that lives under the search header or is an EditText, and prefer an exact
+    name over a partial one.
+    """
+    name = str(shop_name or "").strip()
+    if not source or not name:
+        return None
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return None
+    parent_of: Dict[ET.Element, ET.Element] = {}
+    for node in root.iter():
+        for child in list(node):
+            parent_of[child] = node
+
+    def _row_rect(node: ET.Element) -> Optional[Dict[str, int]]:
+        chain: List[ET.Element] = []
+        current: Optional[ET.Element] = node
+        while current is not None:
+            chain.append(current)
+            current = parent_of.get(current)
+        for ancestor in chain:
+            rid = ancestor.get("resource-id") or ""
+            if any(token in rid for token in _SEARCH_HEADER_RID_TOKENS):
+                return None
+        if (node.get("class") or "").endswith("EditText"):
+            return None
+        # Tap the name label, not the clickable card: the card spans the
+        # whole entry and its centre lands on a deal tile (live 2026-09-23);
+        # the row header is the proven shop-page entry.
+        label = _bounds_rect(node.get("bounds") or "")
+        if label is not None:
+            return label
+        for ancestor in chain:
+            if (ancestor.get("clickable") or "").lower() == "true":
+                rect = _bounds_rect(ancestor.get("bounds") or "")
+                if rect is not None:
+                    return rect
+        return None
+
+    for exact in (True, False):
+        for node in root.iter("node"):
+            text = node.get("text") or ""
+            if (text == name) if exact else (name in text):
+                rect = _row_rect(node)
+                if rect is not None:
+                    return rect
+    return None
+
+
+def shop_page_has_review_entry(source: str, shop_name: str) -> bool:
+    """True when the restored shop page already shows a review CTA."""
+    if not source or not shop_name:
+        return False
+    if shop_name not in source:
+        return False
+    return any(
+        label in source for label in ("完善评价", "编辑评价", "写评价")
+    )
+
+
+def review_editor_is_open(source: str) -> bool:
+    """True when Dianping is already on the Picasso review editor.
+
+    2026-09-21 live: a failed rate left DPPicassoBoxActivity restored on
+    relaunch. That page has 添加图/视频 / 已写N个字 / 取消 / 完成 and does
+    not have 写评价. Searching from there types into the wrong field.
+    """
+    if not source:
+        return False
+    if "添加图/视频" in source:
+        return True
+    return "已写" in source and "个字" in source
+
+
+# The overall bar's five graded labels (2026-09-23 live editor).
+_OVERALL_RATING_LABELS = ("很糟糕", "较差", "一般", "还可以", "很棒", "超预期")
+_DIMENSION_RATING_LABELS = ("口味", "环境", "服务")
+
+
+def editor_has_dimension_rows(source: str) -> bool:
+    """True when the editor exposes per-dimension rows (口味/环境/服务).
+
+    The 2026-09-23 live editor shows only the overall bar; older builds also
+    render 口味/环境/服务 rows. When they are absent, a dimension rate has
+    nothing to anchor on and the step should be skipped, not failed.
+    """
+    try:
+        root = ET.fromstring(source)
+    except (ET.ParseError, TypeError):
+        return False
+    dims = set(_DIMENSION_RATING_LABELS)
+    return any(
+        (node.get("text") or "").strip() in dims for node in root.iter("node")
+    )
+
+
+
+def overall_rating_bar_visible(source: str) -> bool:
+    """True when the 很糟糕..超预期 overall bar is in the tree.
+
+    Same-day overwrite (完善评价 / 编辑评价) keeps the previous stars and
+    never inflates that bar (live 2026-09-21). 口味/环境/服务 on that
+    chrome are topic chips, not dimension rows.
+    """
+    if not source:
+        return False
+    return any(label in source for label in _OVERALL_RATING_LABELS)
+
+
+# The overall card (2026-09-23 live editor): the five caption labels
+# (很糟糕..很棒) at y~250-293 are dead text — tapping one changes nothing. The
+# real control is the row of five star ImageViews below them (y~295-420),
+# one full-card clickable region that maps x to a star. Tapping the Nth
+# star's centre rates and expands the card to reveal 口味/环境/服务.
+#
+# Each caption also carries its own small ImageView icon on the caption
+# line, so "a row of five images near the captions" is ambiguous: on the
+# 2026-09-23 device the icon row sits at cy 271.5 and the star row at 357.5.
+# The star row is the topmost five-image row whose centre is BELOW the
+# caption text (captions bottom y=292 excludes the icons; the dimension
+# strips at 511.5/635.5/759.5 are lower still and never the topmost).
+_OVERALL_STAR_ROW_MIN_MEMBERS = 5
+# The star strip sits ~65px under the captions; a five-image row much
+# further down is a dimension strip or unrelated art, not the overall bar.
+_OVERALL_STAR_ROW_MAX_DROP_PX = 200.0
+# A dimension row's stars are vertically centred on its label's text line
+# (2026-09-23 live: 口味 label y 491-533, stars cy 511.5).
+_DIMENSION_STAR_ROW_Y_TOLERANCE_PX = 45.0
+# The bands and config constants were measured on a 1080px-wide device
+# (OnePlus 7T). Dumps carry the real screen width on the <hierarchy> root,
+# so pixel tolerances scale with it instead of silently assuming 1080px.
+_GEOMETRY_REFERENCE_WIDTH_PX = 1080.0
+
+
+def _hierarchy_root(source: str) -> Optional[ET.Element]:
+    """Parse a dump, returning None for empty or malformed input."""
+    if not source:
+        return None
+    try:
+        return ET.fromstring(source)
+    except (ET.ParseError, TypeError):
+        return None
+
+
+def _screen_width_from_source(source: str) -> Optional[int]:
+    root = _hierarchy_root(source)
+    if root is None:
+        return None
+    try:
+        width = int(root.get("width") or "")
+    except (TypeError, ValueError):
+        return None
+    return width or None
+
+
+def device_geometry_scale(source: str) -> float:
+    """Scale for pixel geometry on the dump's device (1.0 at 1080px width)."""
+    width = _screen_width_from_source(source)
+    if not width:
+        return 1.0
+    return width / _GEOMETRY_REFERENCE_WIDTH_PX
+
+
+def _rect_midpoint(rect: Dict[str, int]) -> Tuple[int, int]:
+    """Integer centre of a rect (floor midpoints, deterministic)."""
+    return (
+        rect["x"] + rect["width"] // 2,
+        rect["y"] + rect["height"] // 2,
+    )
+
+
+def _image_view_rects(root: ET.Element) -> List[Dict[str, int]]:
+    """Bounds of every ImageView in the dump, in document order."""
+    rects: List[Dict[str, int]] = []
+    for node in root.iter("node"):
+        if not (node.get("class") or "").endswith("ImageView"):
+            continue
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is not None:
+            rects.append(rect)
+    return rects
+
+
+def _row_groups(
+    rects: List[Dict[str, int]], tolerance: float = 12.0
+) -> List[Tuple[float, List[Dict[str, int]]]]:
+    """Bucket rects into horizontal rows keyed by y-centre.
+
+    Elements on one line are given as separate nodes in no particular
+    order, so rows are recovered by clustering rather than trusted from
+    the tree shape.
+    """
+    groups: List[Tuple[float, List[Dict[str, int]]]] = []
+    for rect in sorted(rects, key=lambda r: r["y"] + r["height"] / 2):
+        cy = rect["y"] + rect["height"] / 2
+        for index, (group_cy, members) in enumerate(groups):
+            if abs(group_cy - cy) <= tolerance:
+                members.append(rect)
+                groups[index] = (
+                    sum(r["y"] + r["height"] / 2 for r in members) / len(members),
+                    members,
+                )
+                break
+        else:
+            groups.append((cy, [rect]))
+    return groups
+
+
+def overall_star_row_rects(source: str) -> Tuple[Tuple[int, int], ...]:
+    """(x, y) centres of the overall star row, left to right.
+
+    Empty tuple when the star row isn't in the dump (keyboard covers the
+    editor, the wrong page, offline fakes with no hierarchy).
+    """
+    root = _hierarchy_root(source)
+    if root is None:
+        return ()
+    caption_bottom = 0
+    for node in root.iter("node"):
+        if (node.get("text") or "").strip() not in _OVERALL_RATING_LABELS:
+            continue
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is not None:
+            caption_bottom = max(caption_bottom, rect["y"] + rect["height"])
+    if caption_bottom <= 0:
+        return ()
+    scale = device_geometry_scale(source)
+    candidates = [
+        (cy, members)
+        for cy, members in _row_groups(_image_view_rects(root), tolerance=12.0 * scale)
+        if len(members) >= _OVERALL_STAR_ROW_MIN_MEMBERS
+        # The caption icons sit on the caption line itself; the stars below it.
+        and cy > caption_bottom - 1
+        and cy <= caption_bottom + _OVERALL_STAR_ROW_MAX_DROP_PX * scale
+    ]
+    if not candidates:
+        return ()
+    _cy, members = min(candidates, key=lambda group: group[0])
+    return tuple(sorted(_rect_midpoint(rect) for rect in members))
+
+
+def dimension_star_row_rects(
+    source: str, label_rect: Dict[str, int]
+) -> Tuple[Tuple[int, int], ...]:
+    """(x, y) centres of the five-star strip sharing a segment label's line.
+
+    The 2026-09-23 live editor draws each dimension row (口味/环境/服务) as
+    a label plus a strip of five star ImageViews centred on the label's text
+    line, so the geometry is derived from the dump instead of the older
+    measured constants (kept in config only as a fallback when the dump
+    cannot supply the strip).
+    """
+    root = _hierarchy_root(source)
+    if root is None or not label_rect:
+        return ()
+    tolerance = _DIMENSION_STAR_ROW_Y_TOLERANCE_PX * device_geometry_scale(source)
+    low = label_rect["y"] - tolerance
+    high = label_rect["y"] + label_rect["height"] + tolerance
+    points = [
+        _rect_midpoint(rect)
+        for rect in _image_view_rects(root)
+        if low <= rect["y"] + rect["height"] / 2 <= high
+    ]
+    points.sort(key=lambda point: point[0])
+    return tuple(points)
+
+
+def review_publish_chrome_visible(source: str) -> bool:
+    """True when the editor bottom bar already shows 发布."""
+    return bool(source) and "发布" in source
+
+
+def review_ime_toolbar_visible(source: str) -> bool:
+    """True when the Picasso IME toolbar (完成 next to 已写) is up."""
+    return bool(source) and "完成" in source and "已写" in source
+
+
+def should_skip_rating(source: str) -> bool:
+    """Skip stars on same-day overwrite chrome that has no overall bar.
+
+    Empty dumps must not skip: offline fakes have no hierarchy, and the
+    rate path still has to exercise label geometry.
+    """
+    if overall_rating_bar_visible(source):
+        return False
+    return (
+        review_editor_is_open(source)
+        or review_publish_chrome_visible(source)
+        or dish_edit_is_open(source)
+    )
+
+
+def dish_edit_is_open(source: str) -> bool:
+    """True on the Picasso 识别菜品 / dish-edit sheet.
+
+    2026-09-21 overwrite: tapping a leftover editor tile opens this
+    preview instead of a delete confirm. 添加图/视频 is absent here.
+    The leftover 「确认删除这张图片吗？」 sheet is still dish-edit.
+    """
+    if not source:
+        return False
+    return "识别菜品" in source or "确认删除这张图片吗" in source
+
+
+def dish_edit_filmstrip_rects(source: str) -> List[Dict[str, int]]:
+    """Attached thumbnails on the dish-edit filmstrip, excluding 上传照片."""
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return []
+    rects: List[Dict[str, int]] = []
+    seen = set()
+    for node in root.iter("node"):
+        if (node.get("clickable") or "").lower() != "true":
+            continue
+        if (node.get("content-desc") or "") == "上传照片":
+            continue
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is None:
+            continue
+        if not (1880 <= rect["y"] <= 2160):
+            continue
+        if not (80 <= rect["width"] <= 180 and 80 <= rect["height"] <= 180):
+            continue
+        key = (rect["x"], rect["y"], rect["width"], rect["height"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rects.append(rect)
+    rects.sort(key=lambda item: item["x"])
+    return rects
+
+
+def dish_edit_delete_confirm_rect(source: str) -> Optional[Dict[str, int]]:
+    """Orange 「确认删除」 button bounds; never the dialog title.
+
+    Live Picasso (2026-09-21): the title is 「确认删除这张图片吗？」 and the
+    orange control is a clickable TextView whose text is exactly 「确认删除」
+    at ``[568,1211][872,1324]``. Substring matching the dump would hit the
+    title first and tap empty space, leaving the dialog up.
+    """
+    return preferred_tap_rect(source, "text", "确认删除")
+
+
+def dish_edit_trash_rect(source: str) -> Optional[Dict[str, int]]:
+    """Trash control on the dish-edit preview (right of 识别菜品)."""
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return None
+    recognize = None
+    for node in root.iter("node"):
+        if (node.get("text") or "") == "识别菜品":
+            recognize = _bounds_rect(node.get("bounds") or "")
+            break
+    if recognize is None:
+        return None
+    for node in root.iter("node"):
+        if (node.get("clickable") or "").lower() != "true":
+            continue
+        if "ImageView" not in (node.get("class") or ""):
+            continue
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is None:
+            continue
+        if rect["x"] < 800:
+            continue
+        if abs(rect["y"] - recognize["y"]) > 80:
+            continue
+        return rect
+    return None
 
 
 def translate_uiautomator_selector(selector: Any) -> Optional[Tuple[str, str]]:
@@ -817,11 +1805,23 @@ class DianpingUia2Session:
     rating (the 2026-09 editor exposes no stable star ids).
     """
 
-    def __init__(self, kit_session: Any, *, captcha_window_seconds: float = 0.0):
+    _SLIDER_GUARDED_ACTIONS = DianpingAppiumSession._SLIDER_GUARDED_ACTIONS
+
+    def __init__(
+        self,
+        kit_session: Any,
+        *,
+        captcha_window_seconds: float = 0.0,
+        slider_solver: Optional[Callable[[Any], Any]] = None,
+    ):
         self._session = kit_session
         self.info = kit_session.info
-        self.captcha_window_seconds = float(captcha_window_seconds)
+        self.captcha_window_seconds = _coerce_number(
+            "captcha_window_seconds", captcha_window_seconds, 0.0, minimum=0.0
+        )
+        self.slider_solver = slider_solver
         self._manual_window_active = False
+        self._slider_guard_active = False
 
     def start(self) -> None:
         self._session.start()
@@ -832,10 +1832,27 @@ class DianpingUia2Session:
     def capture_artifact(self, artifact_type: str, name: str) -> ArtifactHandle:
         return self._session.capture_artifact(artifact_type, name)
 
+    def _dump_failure(self, label: str) -> None:
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(label))[:40] or "failure"
+        stamp = str(int(time.time()))
+        try:
+            self.capture_artifact("screenshot", "fail-%s-%s.png" % (safe, stamp))
+        except Exception:
+            pass
+        try:
+            self.capture_artifact("page_source", "fail-%s-%s.xml" % (safe, stamp))
+        except Exception:
+            pass
+
     def execute_action(self, action_name: str, **kwargs: Any) -> ActionResult:
         started = time.time()
         print("[dianping-uia2] >> %s" % action_name, flush=True)
-        result = self._run_action(action_name, kwargs)
+        try:
+            result = self._run_action(action_name, kwargs)
+        except ActionParameterError as exc:
+            result = ActionResult(False, "%s: %s" % (action_name, exc))
+        if result.success and action_name in self._SLIDER_GUARDED_ACTIONS:
+            result = self._guard_slider(action_name, result, kwargs)
         print(
             "[dianping-uia2] << %s: %s (%.1fs)"
             % (action_name, "ok" if result.success else "FAIL", time.time() - started),
@@ -843,28 +1860,37 @@ class DianpingUia2Session:
         )
         if not result.success:
             print("[dianping-uia2] failure detail: %s" % result.message[:400], flush=True)
+            self._dump_failure(action_name)
         return result
 
     def _run_action(self, action_name: str, kwargs: Dict[str, Any]) -> ActionResult:
         if action_name == "launch_app":
             result = self._session.execute_action("launch_app", **kwargs)
             if result.success:
-                try:
-                    time.sleep(float(kwargs.get("settle_seconds", 2.0)))
-                except (TypeError, ValueError):
-                    return ActionResult(False, "settle_seconds must be a number")
+                self._ensure_screen_on()
+                time.sleep(_numeric_parameter(kwargs, "settle_seconds", 2.0, minimum=0.0))
             return result
         if action_name == "dismiss_dialogs":
             return self._dismiss_dialogs(**kwargs)
         if action_name == "confirm_search":
             return self._confirm_search(**kwargs)
+        if action_name == "navigate_to_review_editor":
+            return self._navigate_to_review_editor(**kwargs)
+        if action_name == "hide_keyboard":
+            return self._hide_keyboard(**kwargs)
         if action_name == "rate":
             return self._rate(**kwargs)
         if action_name == "element_bounds":
             return self._element_bounds(**kwargs)
         if action_name == "pick_photos":
             return self._pick_photos_uia2(**kwargs)
-        if action_name in {"tap", "type_text", "wait_for_element"}:
+        if action_name == "tap":
+            result = self._tap_with_clickable_parent(kwargs)
+        elif action_name == "type_text":
+            if dish_edit_is_open(self._hierarchy_source()):
+                return ActionResult(True, "type_text skipped; dish-edit already has copy")
+            result = self._with_translated_candidates(action_name, kwargs)
+        elif action_name == "wait_for_element":
             result = self._with_translated_candidates(action_name, kwargs)
         else:
             result = self._session.execute_action(action_name, **kwargs)
@@ -876,6 +1902,94 @@ class DianpingUia2Session:
         ):
             result = self._retry_after_manual_window(action_name, kwargs, result)
         return result
+
+    def _guard_slider(self, action_name: str, result: ActionResult, kwargs: Dict[str, Any]) -> ActionResult:
+        """Detect a risk-control slider that appeared during an action.
+
+        Mirrors the Appium session guard; uia2 exposes the same uiautomator
+        hierarchy XML and a coordinate swipe, so detection and solve rules are
+        shared rather than reimplemented.
+        """
+        if self._slider_guard_active:
+            return result
+        if not page_source_indicates_slider(self._hierarchy_source()):
+            return result
+        self._slider_guard_active = True
+        try:
+            solve = self._attempt_slider_solve()
+            if not solve.success:
+                return ActionResult(
+                    False,
+                    "slider challenge detected during %s; %s" % (action_name, solve.message),
+                )
+            retry = self.execute_action(action_name, **kwargs)
+            if not retry.success:
+                return ActionResult(
+                    False,
+                    "slider solved but %s retry failed: %s" % (action_name, retry.message),
+                )
+            return ActionResult(True, "%s (slider solved; action retried)" % action_name)
+        finally:
+            self._slider_guard_active = False
+
+    def _attempt_slider_solve(self) -> ActionResult:
+        if self.slider_solver is None:
+            return ActionResult(
+                False,
+                "no slider solver configured; rerun with --enable-slidex "
+                "(requires slidex android_screenshot_bytes slider support)",
+            )
+        try:
+            image = self._slider_screenshot_bytes()
+            solution = self.slider_solver(image)
+            if inspect.isawaitable(solution):
+                solution = _await_in_worker_thread(solution)
+        except Exception as exc:
+            return ActionResult(False, "slider solve errored: %s" % exc)
+        params, error = _slider_solution_params(solution)
+        if error is not None:
+            return error
+        return self._perform_slider_swipe(**params)
+
+    def _slider_screenshot_bytes(self) -> bytes:
+        driver = getattr(self._session, "driver", None)
+        capture = getattr(driver, "screenshot", None) if driver is not None else None
+        if not callable(capture):
+            raise RuntimeError("u2 driver cannot capture screenshots")
+        image = capture()
+        if isinstance(image, (bytes, bytearray)):
+            return bytes(image)
+        save = getattr(image, "save", None)
+        if not callable(save):
+            raise RuntimeError("u2 screenshot is neither bytes nor a saveable image")
+        buffer = io.BytesIO()
+        save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def _perform_slider_swipe(
+        self,
+        *,
+        gap_x: Any = None,
+        offset_px: Any = None,
+        scale: float = 1.0,
+    ) -> ActionResult:
+        handle = locate_slider_handle(self._hierarchy_source())
+        if handle is None:
+            return ActionResult(False, "slider handle not located in page source")
+        driver = getattr(self._session, "driver", None)
+        swipe = getattr(driver, "swipe", None) if driver is not None else None
+        if not callable(swipe):
+            return ActionResult(False, "driver does not support coordinate swipe")
+        distance, error = _slider_drag_distance(handle[0], gap_x, offset_px, scale)
+        if error is not None:
+            return error
+        start_x, start_y = handle
+        try:
+            # u2's swipe duration is in seconds, not Appium's milliseconds.
+            swipe(int(start_x), int(start_y), int(start_x + distance), int(start_y), 0.6)
+        except Exception as exc:
+            return ActionResult(False, "slider swipe failed: %s" % exc)
+        return ActionResult(True, "slider swiped %d px" % distance)
 
     def _with_translated_candidates(
         self, action_name: str, kwargs: Dict[str, Any]
@@ -917,9 +2031,336 @@ class DianpingUia2Session:
             "%s failed for all selectors: %s" % (action_name, " | ".join(errors)),
         )
 
+    def _tap_with_clickable_parent(self, kwargs: Dict[str, Any]) -> ActionResult:
+        """Tap a Picasso chrome label via its clickable ancestor.
+
+        Kit tap on the TextView reports success (u2 click is just a gesture at
+        the label bounds) but the 2026-09 shop/editor chrome never receives it:
+        「写评价」 and 「添加图/视频」 are ``clickable=false``. The nearest
+        clickable FrameLayout is the real control. Fall back to a normal kit
+        tap when hierarchy dump is unavailable (offline fakes).
+        """
+        selector = kwargs.get("selector")
+        candidates = as_selector_list(selector) if selector is not None else []
+        driver = getattr(self._session, "driver", None)
+        dump = getattr(driver, "dump_hierarchy", None) if driver is not None else None
+        click = getattr(driver, "click", None) if driver is not None else None
+        source = ""
+        if callable(dump) and callable(click):
+            try:
+                dumped = dump()
+            except Exception as exc:
+                _log_swallowed("uia2 hierarchy dump for tap fallback", exc)
+                dumped = ""
+            if isinstance(dumped, str):
+                source = dumped
+        if source:
+            for candidate in candidates:
+                translated = translate_uiautomator_selector(candidate)
+                if translated is None:
+                    continue
+                by, value = translated
+                rect = preferred_tap_rect(source, by, value)
+                if rect is None:
+                    continue
+                x = rect["x"] + rect["width"] // 2
+                y = rect["y"] + rect["height"] // 2
+                try:
+                    click(int(x), int(y))
+                    return ActionResult(
+                        True,
+                        "tap clickable parent at (%d, %d)" % (int(x), int(y)),
+                        data={"x": int(x), "y": int(y), "selector": value},
+                    )
+                except Exception as exc:
+                    return ActionResult(
+                        False, "clickable-parent tap failed: %s" % exc
+                    )
+        return self._with_translated_candidates("tap", kwargs)
+
+    def _tap_shop_row(self, shop_name: str, fallback_selector: Any) -> ActionResult:
+        """Tap the search-result row, steering clear of the header query box.
+
+        The results page shows the typed query in its search header, which
+        matches the same textContains selector as the row; a plain label tap
+        lands on the toolbar and reopens the suggestion page (live 2026-09-23).
+        """
+        rect = shop_row_tap_rect(self._dump_source(), shop_name)
+        if rect is not None:
+            x = rect["x"] + rect["width"] // 2
+            y = rect["y"] + rect["height"] // 2
+            click = getattr(self._session.driver, "click", None)
+            if callable(click):
+                try:
+                    click(int(x), int(y))
+                    return ActionResult(
+                        True,
+                        "tap shop row at (%d, %d)" % (int(x), int(y)),
+                        data={"x": int(x), "y": int(y)},
+                    )
+                except Exception as exc:
+                    return ActionResult(False, "shop row tap failed: %s" % exc)
+        return self._tap_with_clickable_parent({"selector": fallback_selector})
+
+    def _wait_for_shop_row(self, shop_name: str, timeout: float) -> ActionResult:
+        """Poll until a real result-row card exists on the results page.
+
+        The header query box also contains the shop name, so a plain text
+        wait is satisfied before the row renders and the tap then misses
+        (live 2026-09-23); gate on the same header-immune rect both waits
+        and taps use.
+        """
+        deadline = time.time() + float(timeout)
+        while time.time() < deadline:
+            if shop_row_tap_rect(self._dump_source(), shop_name) is not None:
+                return ActionResult(True, "shop result row present")
+            time.sleep(0.5)
+        return ActionResult(
+            False,
+            "timed out waiting for shop result row (%.1fs)" % float(timeout),
+        )
+
+    def _wait_for_picker(self, timeout: float = 8.0) -> bool:
+        deadline = time.time() + max(timeout, 0.1)
+        while time.time() < deadline:
+            if self._picker_is_open():
+                return True
+            time.sleep(0.4)
+        return self._picker_is_open()
+
+    def _picker_is_open(self) -> bool:
+        """True only when photo tiles are actually in the tree.
+
+        下一步 chrome can inflate before ``photo_imageView``; treating the
+        label as "open" raced a half-drawn sheet and then confirmed nothing.
+        """
+        if self._uia2_widget_exists("id", _PHOTO_SELECT_RESOURCE_ID):
+            return True
+        if self._uia2_widget_exists("id", _PHOTO_IMAGE_RESOURCE_ID):
+            return True
+        driver = getattr(self._session, "driver", None)
+        dump = getattr(driver, "dump_hierarchy", None) if driver is not None else None
+        if not callable(dump):
+            return False
+        try:
+            source = dump()
+        except Exception as exc:
+            # A broken dump means "cannot see any tiles", so report the picker
+            # as closed rather than risk tapping a half-drawn sheet; the log
+            # keeps a live run diagnosable.
+            _log_swallowed("uia2 picker dump", exc)
+            return False
+        if not isinstance(source, str):
+            return False
+        return (
+            _PHOTO_SELECT_RESOURCE_ID in source
+            or _PHOTO_IMAGE_RESOURCE_ID in source
+        )
+
+    def _hierarchy_source(self) -> str:
+        return self._dump_source()
+
+    def _wait_for_marker(self, candidates: Any, timeout: float) -> ActionResult:
+        """Poll the live hierarchy until a candidate node really exists.
+
+        The kit uia2 wait resolves selectors lazily and reports success
+        without touching the tree, so a page transition races the next tap
+        and the flow types/taps on the page it just left (live 2026-09-23).
+        """
+        deadline = time.time() + float(timeout)
+        while time.time() < deadline:
+            source = self._hierarchy_source()
+            try:
+                root = ET.fromstring(source) if source else None
+            except (ET.ParseError, TypeError):
+                root = None
+            for candidate in as_selector_list(candidates) if candidates is not None else []:
+                translated = translate_uiautomator_selector(candidate)
+                if translated is None:
+                    continue
+                by, value = translated
+                if root is not None and any(
+                    _node_matches_selector(node, by, value) for node in root.iter("node")
+                ):
+                    return ActionResult(True, "marker present: %s" % value)
+            time.sleep(0.5)
+        return ActionResult(
+            False, "timed out waiting for page marker (%.1fs)" % float(timeout)
+        )
+
+    def _navigate_to_review_editor(self, **kwargs: Any) -> ActionResult:
+        """Open the review editor from home search or a restored shop page.
+
+        2026-09-21 live: launching Dianping restored PexusPoiActivity on the
+        target shop. The workflow then typed into the shop-page 搜索栏 and
+        failed because search_keyword_edit is not on that page.
+        """
+        shop_name = str(kwargs.get("shop_name") or "")
+        write_selector = kwargs.get("write_selector")
+        source = self._hierarchy_source()
+        if not source:
+            return ActionResult(
+                False, "navigate_to_review_editor: empty hierarchy after wake"
+            )
+        if dish_edit_is_open(source):
+            return ActionResult(True, "navigate_to_review_editor already in dish-edit")
+        if review_editor_is_open(source):
+            return ActionResult(True, "navigate_to_review_editor already in review editor")
+        if shop_page_has_review_entry(source, shop_name):
+            tap = self._tap_with_clickable_parent({"selector": write_selector})
+            if tap.success:
+                return ActionResult(
+                    True, "navigate_to_review_editor via restored shop page"
+                )
+            return tap
+        # A relaunch can restore the app mid-search, sitting on the results
+        # page that already shows the target row. The search-bar selectors are
+        # not on that page and the kit wait/tap report success for absent
+        # elements, so restarting the search would no-op and dead-end on the
+        # input marker. Skip straight to the row tap when we are here.
+        if self._results_page_open(source, shop_name, kwargs):
+            print("[dianping-uia2] navigate: restored search results page", flush=True)
+            return self._advance_from_search_results(shop_name, kwargs)
+        wait = self._with_translated_candidates(
+            "wait_for_element",
+            {"selector": kwargs.get("search_bar"), "timeout": 10.0},
+        )
+        if not wait.success:
+            return wait
+        tap = self._tap_with_clickable_parent({"selector": kwargs.get("search_bar")})
+        if not tap.success:
+            return tap
+        print("[dianping-uia2] navigate: search bar tapped (%s)" % tap.message, flush=True)
+        wait = self._wait_for_marker(kwargs.get("search_input"), 8.0)
+        if not wait.success:
+            return wait
+        print("[dianping-uia2] navigate: search page ready", flush=True)
+        typed = self._with_translated_candidates(
+            "type_text",
+            {"selector": kwargs.get("search_input"), "text": shop_name},
+        )
+        if not typed.success:
+            return typed
+        confirmed = self._confirm_search(
+            selector=kwargs.get("search_confirm"),
+            keycode=66,
+        )
+        if not confirmed.success:
+            return confirmed
+        print("[dianping-uia2] navigate: search confirmed (%s)" % confirmed.message, flush=True)
+        wait = self._wait_for_marker(kwargs.get("search_results_marker"), 12.0)
+        if not wait.success:
+            return wait
+        print("[dianping-uia2] navigate: results page ready", flush=True)
+        return self._advance_from_search_results(shop_name, kwargs)
+
+    def _results_page_open(
+        self, source: str, shop_name: str, kwargs: Dict[str, Any]
+    ) -> bool:
+        """True when the current page is the search results list for the shop.
+
+        Requires both the results chrome (the tab/description markers the
+        suggestion page lacks) and the target row's tap rectangle, so a plain
+        shop-name text match elsewhere can't route here by accident.
+        """
+        if not source:
+            return False
+        try:
+            root = ET.fromstring(source)
+        except (ET.ParseError, TypeError):
+            return False
+        markers = kwargs.get("search_results_marker")
+        chrome = False
+        for candidate in as_selector_list(markers) if markers is not None else []:
+            translated = translate_uiautomator_selector(candidate)
+            if translated is None:
+                continue
+            by, value = translated
+            if any(_node_matches_selector(node, by, value) for node in root.iter("node")):
+                chrome = True
+                break
+        return chrome and shop_row_tap_rect(source, shop_name) is not None
+
+    def _advance_from_search_results(
+        self, shop_name: str, kwargs: Dict[str, Any]
+    ) -> ActionResult:
+        """From an on-screen results page, tap the target row and open the
+        review editor. Shared by the searched path and the restored-results
+        path so both wait on the same real-rect checks."""
+        write_selector = kwargs.get("write_selector")
+        shop_result = shop_result_candidates(shop_name, kwargs.get("shop_result"))
+        row = self._wait_for_shop_row(shop_name, 12.0)
+        if not row.success:
+            return row
+        print("[dianping-uia2] navigate: shop row ready", flush=True)
+        tap = self._tap_shop_row(shop_name, shop_result)
+        if not tap.success:
+            return tap
+        print("[dianping-uia2] navigate: shop row tapped (%s)" % tap.message, flush=True)
+        # The shop page can render slowly (live 2026-09-23: a 部分服务当前不可用
+        # notice delayed the review CTA past 10s), so allow a generous wait.
+        wait = self._wait_for_marker(write_selector, 25.0)
+        if not wait.success:
+            return wait
+        print("[dianping-uia2] navigate: write CTA ready", flush=True)
+        tap = self._tap_with_clickable_parent({"selector": write_selector})
+        if not tap.success:
+            return tap
+        print("[dianping-uia2] navigate: write CTA tapped (%s)" % tap.message, flush=True)
+        opened = self._wait_for_marker(
+            (
+                'uiautomator:new UiSelector().textContains("添加图")',
+                'uiautomator:new UiSelector().text("发布")',
+            ),
+            15.0,
+        )
+        if not opened.success:
+            return ActionResult(
+                False,
+                "navigate_to_review_editor: write tap did not open the editor",
+            )
+        return ActionResult(True, "navigate_to_review_editor via search")
+
     def _confirm_search(self, **kwargs: Any) -> ActionResult:
         selector = kwargs.get("selector")
-        for candidate in as_selector_list(selector) if selector is not None else []:
+        candidates = as_selector_list(selector) if selector is not None else []
+        # Prefer a coordinate tap on the live button. A kit tap on the
+        # suggestion page's 搜索 TextView resolves lazily and reports success
+        # while the app stays on SearchIndexActivity (live 2026-09-23), so the
+        # results wait then times out with the keyword still in the box.
+        driver = getattr(self._session, "driver", None)
+        dump = getattr(driver, "dump_hierarchy", None) if driver is not None else None
+        click = getattr(driver, "click", None) if driver is not None else None
+        source = ""
+        if callable(dump) and callable(click):
+            try:
+                dumped = dump()
+            except Exception as exc:
+                _log_swallowed("uia2 hierarchy dump for tap fallback", exc)
+                dumped = ""
+            if isinstance(dumped, str):
+                source = dumped
+        if source:
+            for candidate in candidates:
+                translated = translate_uiautomator_selector(candidate)
+                if translated is None:
+                    continue
+                by, value = translated
+                rect = preferred_tap_rect(source, by, value)
+                if rect is None:
+                    continue
+                x = rect["x"] + rect["width"] // 2
+                y = rect["y"] + rect["height"] // 2
+                try:
+                    click(int(x), int(y))
+                    return ActionResult(
+                        True,
+                        "confirm_search tap at (%d, %d)" % (int(x), int(y)),
+                        data={"x": int(x), "y": int(y), "selector": value},
+                    )
+                except Exception as exc:
+                    return ActionResult(False, "confirm_search tap failed: %s" % exc)
+        for candidate in candidates:
             translated = translate_uiautomator_selector(candidate)
             if translated is None:
                 continue
@@ -939,13 +2380,69 @@ class DianpingUia2Session:
                 return ActionResult(True, "confirm_search via keycode")
         return ActionResult(False, "confirm_search failed for all selectors")
 
-    def _rate(self, **kwargs: Any) -> ActionResult:
-        anchor = kwargs.get("anchor")
-        if anchor not in {"overall", "dimension_row"}:
-            return ActionResult(False, "uia2 rate requires a label anchor")
-        selector = kwargs.get("selector")
-        candidates = as_selector_list(selector) if selector is not None else []
-        label_rect = None
+    def _hide_keyboard(self, **kwargs: Any) -> ActionResult:
+        """Dismiss the IME so the overall rating bar is visible.
+
+        2026-09-21 editor: type_text leaves the keyboard covering 超预期.
+        Prefer the Picasso toolbar 「完成」; fall back to BACK.
+        Once 发布 is already on screen, BACK would leave the editor.
+        """
+        source = self._hierarchy_source()
+        if dish_edit_is_open(source) or (
+            review_publish_chrome_visible(source) and not review_ime_toolbar_visible(source)
+        ):
+            return ActionResult(True, "hide_keyboard skipped; editor chrome visible")
+        tap = self._tap_with_clickable_parent(
+            {
+                "selector": (
+                    'uiautomator:new UiSelector().text("完成")',
+                    "~完成",
+                )
+            }
+        )
+        if tap.success:
+            time.sleep(0.4)
+            return ActionResult(True, "hide_keyboard via 完成")
+        press = getattr(self._session.driver, "press", None) or getattr(
+            self._session.driver, "press_key", None
+        )
+        if callable(press):
+            try:
+                press("back")
+                time.sleep(0.4)
+                return ActionResult(True, "hide_keyboard via BACK")
+            except Exception:
+                try:
+                    press(4)
+                    time.sleep(0.4)
+                    return ActionResult(True, "hide_keyboard via BACK")
+                except Exception as exc:
+                    return ActionResult(False, "hide_keyboard BACK failed: %s" % exc)
+        return ActionResult(True, "hide_keyboard skipped")
+
+    def _label_rect_from_source(
+        self, candidates: List[str], source: Optional[str] = None
+    ) -> Optional[Dict[str, int]]:
+        """Resolve a rating label's geometry from the live hierarchy dump.
+
+        Our own dump is preferred: ``preferred_tap_rect`` yields the exact
+        node rectangle with no extra round trip, and it is the path proven on
+        the 2026-09-23 device. The kit ``element_bounds`` action is the
+        fallback for when no hierarchy is available (offline fakes, a failed
+        dump); it reads the element snapshot, so it answers correctly as long
+        as the driver can resolve the selector.
+        """
+        if source is None:
+            source = self._hierarchy_source()
+        if source:
+            for candidate in candidates:
+                translated = translate_uiautomator_selector(candidate)
+                if translated is None:
+                    continue
+                by, value = translated
+                rect = preferred_tap_rect(source, by, value)
+                if rect is not None:
+                    return rect
         for candidate in candidates:
             translated = translate_uiautomator_selector(candidate)
             if translated is None:
@@ -955,70 +2452,108 @@ class DianpingUia2Session:
                 "element_bounds", selector=value, by=by
             )
             if result.success and isinstance(result.data, dict):
-                label_rect = result.data
-                break
+                return result.data
+        return None
+
+    def _rate(self, **kwargs: Any) -> ActionResult:
+        source = self._hierarchy_source()
+        if should_skip_rating(source):
+            return ActionResult(
+                True,
+                "rate skipped; overall bar not on overwrite chrome",
+                data={"dimension": kwargs.get("dimension"), "value": kwargs.get("value")},
+            )
+        anchor = kwargs.get("anchor")
+        if anchor not in {"overall", "dimension_row"}:
+            return ActionResult(False, "uia2 rate requires a label anchor")
+        selector = kwargs.get("selector")
+        candidates = as_selector_list(selector) if selector is not None else []
         try:
             numeric_value = int(kwargs.get("value"))
         except (TypeError, ValueError):
             return ActionResult(False, "rate requires a numeric value")
         if not 1 <= numeric_value <= 5:
             return ActionResult(False, "rating value must be 1-5")
-        # Overall bar: a 5-option segmented control whose options ARE the
-        # tappable text labels (很糟糕..超预期). Tap the label directly; no
-        # star geometry to guess. The selector already resolves to the
-        # target label via overall_rating_selector(value).
+        # Overall bar: a row of five star ImageViews under dead caption labels
+        # (很糟糕..很棒 are not touch targets). The star row is one clickable
+        # region bucketed by x; tap the Nth star centre, read from the dump
+        # (2026-09-23 live). The caption selector is carried by the caller but
+        # only needed as a fallback when the star row cannot be parsed.
         if anchor == "overall":
-            if label_rect is None:
-                return ActionResult(False, "overall rating label not found on uia2")
-            tap = self._with_translated_candidates(
-                "tap", {"selector": kwargs.get("selector")}
-            )
-            if not tap.success:
-                return ActionResult(
-                    False, "overall rating tap failed: %s" % tap.message
+            stars = overall_star_row_rects(source)
+            if len(stars) < numeric_value:
+                hidden = self._hide_keyboard()
+                if hidden.success:
+                    source = self._hierarchy_source()
+                    stars = overall_star_row_rects(source)
+            if len(stars) < numeric_value:
+                return ActionResult(False, "overall rating bar not found on uia2")
+            x, y = stars[numeric_value - 1]
+            try:
+                result = self._session.execute_action(
+                    "swipe",
+                    start_x=x,
+                    start_y=y,
+                    end_x=x,
+                    end_y=y,
+                    duration=0.08,
                 )
-            return ActionResult(True, "uia2 overall rating set")
-        # Dimension rows (口味/环境/服务): a 5-star strip to the right of the
-        # row label. Resolve the row label's bounds, then tap the Nth star
-        # by geometry across the strip.
+            except Exception as exc:
+                return ActionResult(False, "uia2 overall rate failed: %s" % exc)
+            if not result.success:
+                return result
+            return ActionResult(
+                True, "uia2 overall rating set (%d star)" % numeric_value
+            )
+        # Dimension rows (口味/环境/服务): a 5-star strip on the row label's
+        # line. Resolve the row label's bounds, then prefer the star strip's
+        # own geometry from the dump; fall back to the measured strip
+        # constants only when the dump cannot supply it.
+        label_rect = self._label_rect_from_source(candidates, source)
         if label_rect is None:
+            if not editor_has_dimension_rows(source):
+                return ActionResult(
+                    True,
+                    "dimension rate skipped; editor has no %s row"
+                    % kwargs.get("dimension"),
+                    data={
+                        "dimension": kwargs.get("dimension"),
+                        "value": kwargs.get("value"),
+                    },
+                )
             return ActionResult(False, "dimension rating label not found on uia2")
-        from automation_app_dianping.config import default_selectors
+        stars = dimension_star_row_rects(source, label_rect)
+        if len(stars) >= numeric_value:
+            x, y = stars[numeric_value - 1]
+        else:
+            from automation_app_dianping.config import default_selectors
 
-        selectors = default_selectors()
-        # Tap the Nth star's centre. The strip's first-star centre and the
-        # pitch were measured on the 2026-09 editor (236px, 144px pitch).
-        x = (
-            selectors.rating_dim_star_origin_px
-            + selectors.rating_dim_star_pitch_px * (numeric_value - 1)
-        )
-        y = label_rect["y"] + label_rect["height"] / 2
+            selectors = default_selectors()
+            # Older editors' measured strip: first star centre 236, pitch 144
+            # (scaled to the dump's real screen width).
+            scale = device_geometry_scale(source)
+            x = int(
+                (
+                    selectors.rating_dim_star_origin_px
+                    + selectors.rating_dim_star_pitch_px * (numeric_value - 1)
+                )
+                * scale
+            )
+            y = int(label_rect["y"] + label_rect["height"] / 2)
         try:
             result = self._session.execute_action(
                 "swipe",
-                start_x=int(x),
-                start_y=int(y),
-                end_x=int(x),
-                end_y=int(y),
+                start_x=x,
+                start_y=y,
+                end_x=x,
+                end_y=y,
                 duration=0.08,
             )
         except Exception as exc:
             return ActionResult(False, "uia2 rate swipe failed: %s" % exc)
         if not result.success:
             return result
-        return ActionResult(True, "uia2 star tapped at (%d, %d)" % (int(x), int(y)))
-
-    def _resolve_half_star_popup(self, value: int) -> None:
-        """Pick the exact integer if the tap split a star (best effort)."""
-        try:
-            by, popup_value = translate_uiautomator_selector(
-                'uiautomator:new UiSelector().text("%s星")' % value
-            )
-            self._session.execute_action(
-                "tap", selector=popup_value, by=by
-            )
-        except Exception:
-            pass
+        return ActionResult(True, "uia2 star tapped at (%d, %d)" % (x, y))
 
     def _element_bounds(self, **kwargs: Any) -> ActionResult:
         selector = kwargs.get("selector")
@@ -1037,75 +2572,379 @@ class DianpingUia2Session:
     def _pick_photos_uia2(self, **kwargs: Any) -> ActionResult:
         """Attach review photos on the 2026-09 editor.
 
-        Each photo must be a host-side file path: it is prepared onto the
-        device gallery first (EXIF datetaken rewritten to now, pushed, media
-        scanned, indexed-first verified), because the picker offers no path
-        input and orders 最近项目 by capture time — without the rewrite the
-        pushed image sinks below camera roll shots and the first tile is a
-        random gallery photo (observed 2026-09-20). Then taps the add
-        entry, selects the first ``len(photos)`` thumbnails, and confirms.
+        Each photo must be a host-side file path. It is staged into an isolated
+        ``DianpingAuto`` album (not Camera / 最近项目): Picasso's 最近项目 mix
+        is not MediaStore datetaken order, and Camera tile 0 is a private
+        family photo (observed 2026-09-21). Same-day 编辑评价 keeps leftover
+        thumbnails from the previous publish; those are cleared first so the
+        new review is only the staged file. After add, the picker must switch
+        to that album before any checkbox tap; selecting instance 0 on
+        最近项目 attaches a downloads/lab image. Then the first
+        ``len(photos)`` checkboxes in that album are selected and confirmed.
         """
         photos = kwargs.get("photos") or []
         if not photos:
             return ActionResult(True, "pick_photos: nothing to attach")
-        prepared = []
-        for photo in photos:
-            prep = self._prepare_gallery_photo(str(photo))
+        # Stage oldest first so each push is indexed-first at its moment,
+        # and photos[0] (newest EXIF) lands as picker photo-tile 0.
+        count = len(photos)
+        for rank in range(count - 1, -1, -1):
+            prep = self._prepare_gallery_photo(str(photos[rank]), recency_rank=rank)
             if not prep.success:
                 return ActionResult(
                     False,
                     "pick_photos: gallery prep failed for %s: %s"
-                    % (photo, prep.message),
+                    % (photos[rank], prep.message),
                 )
-            prepared.append(prep.data["display_name"])
-        add = self._with_translated_candidates(
-            "tap", {"selector": kwargs.get("add_selector")}
-        )
-        if not add.success:
-            return ActionResult(False, "pick_photos: add button not found: %s" % add.message)
-        time.sleep(1.5)
+        cleared = self._clear_existing_editor_photos()
+        if not cleared.success:
+            return cleared
+        after_editor = self._dump_source()
+        if dish_edit_is_open(after_editor) or dish_edit_delete_confirm_rect(after_editor):
+            extra = self._clear_dish_edit_photos()
+            if not extra.success:
+                return extra
+        opened = self._open_photo_picker(kwargs.get("add_selector"))
+        if not opened.success:
+            return opened
+        switched = self._switch_to_staging_album()
+        if not switched.success:
+            return switched
+        if not self._header_album_is(self._GALLERY_ALBUM):
+            return ActionResult(
+                False,
+                "pick_photos: refused to select outside %s" % self._GALLERY_ALBUM,
+            )
         thumb_selector = kwargs.get("thumbnail_selector")
         selected = 0
-        for index in range(len(photos)):
-            # The picker lays thumbnails out in a grid; the class-only
-            # ImageView selector resolves the first unselected tile as the
-            # grid scrolls, so tapping instance-by-instance walks the row.
+        for index in range(count):
             tap = self._pick_photo_tile(thumb_selector, index)
             if not tap.success:
                 break
             selected += 1
             time.sleep(0.4)
-        if selected == 0:
-            return ActionResult(False, "pick_photos: no gallery thumbnail tapped")
-        confirm = self._with_translated_candidates(
-            "tap", {"selector": kwargs.get("confirm_selector")}
-        )
-        if not confirm.success:
+        if selected != count:
             return ActionResult(
-                False, "pick_photos: confirm not found: %s" % confirm.message
+                False,
+                "pick_photos: attached %d of %d photo tile(s)" % (selected, count),
             )
+        confirm = self._confirm_picked_photos(kwargs.get("confirm_selector"))
+        if not confirm.success:
+            return confirm
         return ActionResult(
             True, "pick_photos: attached %d photo(s)" % selected
         )
 
-    _GALLERY_DIR = "/sdcard/DCIM/Camera"
+    _GALLERY_DIR = "/sdcard/Pictures/DianpingAuto"
+    _GALLERY_ALBUM = "DianpingAuto"
     _PUSH_PREFIX = "IMG99999999_"
+    _ALBUM_DROPDOWN_CANDIDATES = (
+        "最近项目",
+        "Camera",
+        "Pictures",
+        "downloads",
+        "Screenshots",
+        "WeiXin",
+    )
 
-    def _prepare_gallery_photo(self, host_path: str) -> ActionResult:
-        """Stage one host image so the picker's first tile is exactly it.
+    def _clear_existing_editor_photos(self) -> ActionResult:
+        """Remove leftover numbered thumbnails before attaching staged photos.
 
-        The dianping gallery picker exposes no path input and orders tiles
-        by capture time (media provider ``datetaken``, read from EXIF).
-        Three steps make the target deterministic:
+        Same-day 编辑评价 (2026-09-21) keeps the previous review's tiles.
+        Tapping the thumbnail opens a preview whose 删除/移除 control
+        actually drops it. The dump has no dedicated delete node on the
+        editor itself, so we tap the badge tile's top-right (the × overlay
+        on 2026-09 chrome) first, then any 删除/移除 that appears on the
+        preview.
 
-        1. rewrite EXIF DateTimeOriginal/DateTime to now (a plain ``adb
-           push`` carries no EXIF, so MediaProvider indexes ``datetaken``
-           as NULL, which sorts last);
-        2. push to ``IMG99999999_<name>`` under the camera bucket and
-           trigger a single-file media scan;
-        3. poll the media index until the row appears AND its datetaken
-           tops every other image; otherwise fail instead of letting the
-           flow pick an arbitrary gallery photo.
+        Two guards keep this from deleting blind: the delete label is only
+        tapped after the tile tap demonstrably changed the page (a tap that
+        changes nothing never reaches a delete control), and at most
+        ``_MAX_EDITOR_PHOTO_CLEARS`` tiles are removed per run. A numbered
+        tile that remains fails the step with screenshot/page_source
+        evidence — publishing leftovers would mix lab/ginkgo shots with the
+        staged noodle.
+        """
+        driver = getattr(self._session, "driver", None)
+        click = getattr(driver, "click", None) if driver is not None else None
+        if not callable(click):
+            return ActionResult(True, "clear editor photos: no click driver")
+        removed = 0
+        for _ in range(_MAX_EDITOR_PHOTO_CLEARS):
+            source = self._dump_source()
+            rects = editor_attached_photo_rects(source) if source else []
+            if not rects:
+                return ActionResult(
+                    True, "cleared %d leftover editor photo(s)" % removed
+                )
+            rect = rects[0]
+            corner_x = rect["x"] + max(rect["width"] - 18, rect["width"] * 3 // 4)
+            corner_y = rect["y"] + min(18, max(rect["height"] // 8, 8))
+            center_x = rect["x"] + rect["width"] // 2
+            center_y = rect["y"] + rect["height"] // 2
+            dropped = False
+            for x, y in ((corner_x, corner_y), (center_x, center_y)):
+                try:
+                    click(int(x), int(y))
+                except Exception as exc:
+                    return ActionResult(
+                        False, "clear editor photos: tile tap failed: %s" % exc
+                    )
+                time.sleep(0.6)
+                after = self._dump_source() or ""
+                if dish_edit_is_open(after):
+                    return ActionResult(True, "leftover opened dish-edit")
+                if not after or after == source:
+                    # The tap hit nothing: never tap a delete control blind.
+                    continue
+                self._confirm_editor_photo_delete(after)
+                remaining = editor_attached_photo_rects(self._dump_source() or "")
+                if len(remaining) < len(rects):
+                    dropped = True
+                    break
+            if not dropped:
+                self._dump_failure("clear_editor_photos")
+                return ActionResult(
+                    False,
+                    "clear editor photos: leftover tile did not drop "
+                    "(still %d)" % len(rects),
+                )
+            removed += 1
+        leftover = editor_attached_photo_rects(self._dump_source() or "")
+        if leftover:
+            self._dump_failure("clear_editor_photos")
+            return ActionResult(
+                False,
+                "clear editor photos: %d tile(s) remain after the %d-photo cap"
+                % (len(leftover), _MAX_EDITOR_PHOTO_CLEARS),
+            )
+        return ActionResult(True, "cleared %d leftover editor photo(s)" % removed)
+
+    def _open_photo_picker(self, add_selector: Any) -> ActionResult:
+        """Open the album picker from the editor or the dish-edit plus tile."""
+        if dish_edit_is_open(self._dump_source()):
+            add = self._tap_dish_edit_plus()
+            if not add.success:
+                return add
+            if self._wait_for_picker(timeout=8.0):
+                return ActionResult(True, "picker via dish-edit plus")
+            return ActionResult(
+                False, "pick_photos: dish-edit plus did not open picker"
+            )
+        for attempt in range(2):
+            add = self._tap_with_clickable_parent({"selector": add_selector})
+            if not add.success:
+                return ActionResult(
+                    False, "pick_photos: add button not found: %s" % add.message
+                )
+            if self._wait_for_picker(timeout=8.0):
+                return ActionResult(True, "picker via add button")
+            if attempt == 0:
+                time.sleep(0.8)
+        return ActionResult(False, "pick_photos: add button did not open picker")
+
+    def _click_rect(self, rect: Dict[str, int]) -> ActionResult:
+        driver = getattr(self._session, "driver", None)
+        click = getattr(driver, "click", None) if driver is not None else None
+        if not callable(click):
+            return ActionResult(False, "no click driver")
+        x = rect["x"] + rect["width"] // 2
+        y = rect["y"] + rect["height"] // 2
+        try:
+            click(int(x), int(y))
+        except Exception as exc:
+            return ActionResult(False, "click failed: %s" % exc)
+        return ActionResult(True, "clicked (%d, %d)" % (int(x), int(y)))
+
+    def _clear_dish_edit_photos(self) -> ActionResult:
+        """Delete every filmstrip thumbnail on the 识别菜品 sheet.
+
+        Trash opens 「确认删除这张图片吗？」; the orange control is
+        「确认删除」, not the toolbar 「确定」. A leftover dialog from a
+        previous run is confirmed first so we do not tap through it.
+        """
+        removed = 0
+        for _ in range(8):
+            source = self._dump_source()
+            if dish_edit_delete_confirm_rect(source) is not None:
+                before = dish_edit_filmstrip_rects(source)
+                confirmed = self._confirm_dish_edit_photo_delete()
+                if not confirmed.success:
+                    return confirmed
+                if before:
+                    dropped = self._wait_dish_edit_count_drop(len(before), timeout=3.0)
+                    if not dropped:
+                        remaining = dish_edit_filmstrip_rects(self._dump_source())
+                        return ActionResult(
+                            False,
+                            "clear dish-edit photos: leftover tile did not drop "
+                            "(still %d)" % len(remaining),
+                        )
+                removed += 1
+                continue
+            if not dish_edit_is_open(source):
+                return ActionResult(
+                    True, "cleared %d dish-edit photo(s)" % removed
+                )
+            rects = dish_edit_filmstrip_rects(source)
+            if not rects:
+                return ActionResult(
+                    True, "cleared %d dish-edit photo(s)" % removed
+                )
+            tapped = self._click_rect(rects[0])
+            if not tapped.success:
+                return ActionResult(
+                    False, "clear dish-edit photos: %s" % tapped.message
+                )
+            time.sleep(0.4)
+            trash = dish_edit_trash_rect(self._dump_source())
+            if trash is None:
+                return ActionResult(False, "clear dish-edit photos: trash not found")
+            dumped = self._click_rect(trash)
+            if not dumped.success:
+                return dumped
+            confirmed = self._confirm_dish_edit_photo_delete()
+            if not confirmed.success:
+                return confirmed
+            if not self._wait_dish_edit_count_drop(len(rects), timeout=3.0):
+                remaining = dish_edit_filmstrip_rects(self._dump_source())
+                return ActionResult(
+                    False,
+                    "clear dish-edit photos: leftover tile did not drop "
+                    "(still %d)" % len(remaining),
+                )
+            removed += 1
+        leftover = dish_edit_filmstrip_rects(self._dump_source())
+        if leftover:
+            return ActionResult(
+                False,
+                "clear dish-edit photos: %d leftover tile(s) remain" % len(leftover),
+            )
+        return ActionResult(True, "cleared %d dish-edit photo(s)" % removed)
+
+    def _tap_dish_edit_plus(self) -> ActionResult:
+        """Open the album picker from the dish-edit 上传照片 tile."""
+        source = self._dump_source()
+        rect = preferred_tap_rect(source, "description", "上传照片")
+        if rect is None:
+            return ActionResult(False, "dish-edit plus not found")
+        tapped = self._click_rect(rect)
+        if not tapped.success:
+            return tapped
+        time.sleep(0.6)
+        return ActionResult(True, "tapped dish-edit plus")
+
+    def _wait_dish_edit_count_drop(self, before: int, timeout: float = 3.0) -> bool:
+        deadline = time.time() + max(timeout, 0.1)
+        while time.time() < deadline:
+            remaining = dish_edit_filmstrip_rects(self._dump_source())
+            if len(remaining) < before:
+                return True
+            time.sleep(0.25)
+        return len(dish_edit_filmstrip_rects(self._dump_source())) < before
+
+    def _confirm_dish_edit_photo_delete(self) -> ActionResult:
+        """Confirm Picasso's 确认删除这张图片吗 dialog.
+
+        The orange control is 「确认删除」, not the toolbar 「确定」 and not
+        「考虑一下」. Tap the exact button bounds and retry if the dialog
+        stays up — a leftover dialog from a previous run is the first
+        thing to dismiss, not another trash tap.
+        """
+        deadline = time.time() + 4.0
+        taps = 0
+        while time.time() < deadline:
+            source = self._dump_source()
+            rect = dish_edit_delete_confirm_rect(source)
+            if rect is not None:
+                tapped = self._click_rect(rect)
+                if not tapped.success:
+                    return ActionResult(
+                        False,
+                        "clear dish-edit photos: confirm tap failed: %s" % tapped.message,
+                    )
+                taps += 1
+                gone_until = time.time() + 1.2
+                while time.time() < gone_until:
+                    if dish_edit_delete_confirm_rect(self._dump_source()) is None:
+                        return ActionResult(True, "confirmed dish-edit delete")
+                    time.sleep(0.2)
+                if taps >= 3:
+                    return ActionResult(
+                        False,
+                        "clear dish-edit photos: delete dialog stuck after confirm",
+                    )
+                continue
+            if "确认删除这张图片吗" not in source:
+                return ActionResult(True, "no dish-edit delete dialog")
+            time.sleep(0.2)
+        return ActionResult(False, "clear dish-edit photos: delete dialog stuck")
+
+    def _confirm_editor_photo_delete(self, source: str) -> None:
+        """Tap 删除/移除 only while a photo preview is showing.
+
+        ``source`` is the post-tap dump. The editor's own chrome also carries
+        删除/移除 labels; tapping one there would touch the review, not a
+        leftover thumbnail, so the confirm is skipped while the editor's
+        发布 bar is still on screen.
+        """
+        if not source or review_publish_chrome_visible(source):
+            return
+        for label in ("删除", "移除"):
+            if not self._uia2_widget_exists("text", label):
+                continue
+            tap = self._tap_with_clickable_parent(
+                {
+                    "selector": (
+                        'uiautomator:new UiSelector().text("%s")' % label,
+                    )
+                }
+            )
+            if tap.success:
+                time.sleep(0.5)
+                return
+
+    @staticmethod
+    def _push_file(device: Any, local: str, remote: str) -> None:
+        """Push ``local`` onto the device. u2 Device has ``push``, not ``sync``.
+
+        2026-09 live: ``Device.sync`` is absent; ``Device.push(src, dst)`` and
+        ``Device.adb_device.sync.push`` both work. Prefer the Device API so a
+        duck-typed fake only needs ``push``.
+        """
+        pusher = getattr(device, "push", None)
+        if callable(pusher):
+            pusher(local, remote)
+            return
+        sync = getattr(device, "sync", None)
+        sync_push = getattr(sync, "push", None) if sync is not None else None
+        if callable(sync_push):
+            sync_push(local, remote)
+            return
+        adb_device = getattr(device, "adb_device", None)
+        adb_sync = getattr(adb_device, "sync", None) if adb_device is not None else None
+        adb_push = getattr(adb_sync, "push", None) if adb_sync is not None else None
+        if callable(adb_push):
+            adb_push(local, remote)
+            return
+        raise AttributeError("driver does not support file push")
+
+    def _prepare_gallery_photo(self, host_path: str, recency_rank: int = 0) -> ActionResult:
+        """Stage one host image into the isolated ``DianpingAuto`` album.
+
+        2026-09-21 live: MediaStore datetaken-first is not Picasso 最近项目
+        order, and Camera tile 0 is a private family photo. Staging into a
+        dedicated folder means the picker can switch to that album and the
+        only selectable tiles are the files we pushed.
+
+        Steps:
+
+        1. rewrite EXIF DateTimeOriginal/DateTime to now minus
+           ``recency_rank`` seconds-pairs (a plain ``adb push`` carries no
+           EXIF, so MediaProvider indexes ``datetaken`` as NULL);
+        2. mkdir the isolated album, push ``IMG99999999_<name>``, media-scan;
+        3. poll until the row is in ``DianpingAuto`` AND tops that album by
+           datetaken; otherwise fail instead of picking a private tile.
         """
         device = getattr(self._session, "driver", None)
         if device is None or not hasattr(device, "shell"):
@@ -1122,9 +2961,15 @@ class DianpingUia2Session:
         try:
             image = Image.open(source)
             exif = image.getexif()
-            timestamp = time.strftime("%Y:%m:%d %H:%M:%S")
+            captured = time.time() - max(int(recency_rank), 0) * 2
+            timestamp = time.strftime("%Y:%m:%d %H:%M:%S", time.localtime(captured))
             exif[36867] = timestamp
             exif[306] = timestamp
+            # The album/MEDIA_SCANNER contract is JPEG (datetaken EXIF). A
+            # generated PNG may carry alpha (RGBA/LA/P), which JPEG cannot
+            # encode — flatten to RGB so any resolved source stages cleanly.
+            if image.mode not in ("RGB", "L", "CMYK"):
+                image = image.convert("RGB")
             buffer = io.BytesIO()
             image.save(buffer, "JPEG", exif=exif, quality=85)
         except Exception as exc:
@@ -1132,10 +2977,12 @@ class DianpingUia2Session:
 
         display_name = self._PUSH_PREFIX + source.name
         remote = "%s/%s" % (self._GALLERY_DIR, display_name)
+        staging = None
         try:
             staging = source.with_name("staged-" + display_name)
             staging.write_bytes(buffer.getvalue())
-            device.sync.push(str(staging), remote)
+            device.shell(["mkdir", "-p", self._GALLERY_DIR])
+            self._push_file(device, str(staging), remote)
             device.shell(
                 [
                     "am", "broadcast", "-a",
@@ -1146,36 +2993,54 @@ class DianpingUia2Session:
         except Exception as exc:
             return ActionResult(False, "gallery prep: push/scan failed: %s" % exc)
         finally:
-            try:
-                staging.unlink()
-            except OSError:
-                pass
+            if staging is not None:
+                try:
+                    staging.unlink()
+                except OSError:
+                    pass
 
         deadline = time.time() + 20.0
         while time.time() < deadline:
             try:
-                row = device.shell(
-                    [
-                        "content", "query",
-                        "--uri", "content://media/external/images/media",
-                        "--projection", "_display_name:datetaken",
-                        "--where", "_display_name='%s'" % display_name,
-                    ]
-                ).strip()
-                if row and "datetaken=NULL" not in row:
-                    top = device.shell(
+                row = _shell_text(
+                    device.shell(
                         [
                             "content", "query",
                             "--uri", "content://media/external/images/media",
-                            "--projection", "_display_name:datetaken",
-                            "--sort", "datetaken DESC",
+                            "--projection", "_display_name:bucket_display_name:datetaken",
+                            "--where",
+                            "_display_name='%s' AND bucket_display_name='%s'"
+                            % (display_name, self._GALLERY_ALBUM),
                         ]
-                    ).strip().splitlines()
-                    if top and display_name in top[0]:
+                    )
+                )
+                if (
+                    row
+                    and "datetaken=NULL" not in row
+                    and _media_field(row, "bucket_display_name") == self._GALLERY_ALBUM
+                ):
+                    top = _shell_text(
+                        device.shell(
+                            [
+                                "content", "query",
+                                "--uri", "content://media/external/images/media",
+                                "--projection", "_display_name:datetaken",
+                                "--where",
+                                "bucket_display_name='%s'" % self._GALLERY_ALBUM,
+                                "--sort", "datetaken DESC",
+                            ]
+                        )
+                    ).splitlines()
+                    if top and _media_display_name(top[0]) == display_name:
                         return ActionResult(
                             True,
-                            "gallery prep: %s indexed first" % display_name,
-                            data={"display_name": display_name, "remote": remote},
+                            "gallery prep: %s indexed first in %s"
+                            % (display_name, self._GALLERY_ALBUM),
+                            data={
+                                "display_name": display_name,
+                                "remote": remote,
+                                "album": self._GALLERY_ALBUM,
+                            },
                         )
             except Exception:
                 pass
@@ -1185,28 +3050,287 @@ class DianpingUia2Session:
             "gallery prep: %s not indexed first within 20s" % display_name,
         )
 
-    def _pick_photo_tile(self, thumb_selector: Any, index: int) -> ActionResult:
-        """Tap the gallery thumbnail at ``index`` via a UiSelector instance."""
-        base = None
-        for candidate in as_selector_list(thumb_selector) if thumb_selector else []:
-            if isinstance(candidate, str) and "className" in candidate:
-                base = candidate
-                break
-        if base is None:
-            return self._with_translated_candidates(
-                "tap", {"selector": thumb_selector}
-            )
-        # Insert an .instance(index) so successive taps hit successive tiles;
-        # the kit translator rejects instance() chains, so drive u2 directly.
-        cls = base.split('className("', 1)[1].split('")', 1)[0]
+    def _dump_once(self) -> str:
+        driver = getattr(self._session, "driver", None)
+        dump = getattr(driver, "dump_hierarchy", None) if driver is not None else None
+        if not callable(dump):
+            return ""
         try:
-            widget = self._session.driver(className=cls, instance=index)
-            if not widget.exists:
-                return ActionResult(False, "thumbnail instance %d absent" % index)
-            widget.click()
-            return ActionResult(True, "tapped thumbnail %d" % index)
+            source = dump()
         except Exception as exc:
-            return ActionResult(False, "thumbnail tap failed: %s" % exc)
+            _log_swallowed("uia2 dump_hierarchy", exc)
+            return ""
+        return source if isinstance(source, str) else ""
+
+    def _ensure_screen_on(self) -> None:
+        """Wake the panel; a black dump looks like home and starts a shop search."""
+        driver = getattr(self._session, "driver", None)
+        if driver is None:
+            return
+        info = getattr(driver, "info", None)
+        if callable(info):
+            try:
+                info = info()
+            except Exception:
+                info = None
+        on = True
+        if isinstance(info, dict):
+            if "displayOn" in info:
+                on = bool(info.get("displayOn"))
+            elif "screenOn" in info:
+                on = bool(info.get("screenOn"))
+        if on:
+            return
+        screen_on = getattr(driver, "screen_on", None)
+        if callable(screen_on):
+            try:
+                screen_on()
+                return
+            except Exception:
+                pass
+        shell = getattr(driver, "shell", None)
+        if callable(shell):
+            try:
+                shell("input keyevent 224")
+            except Exception:
+                pass
+
+    def _dump_source(self) -> str:
+        source = self._dump_once()
+        if source:
+            return source
+        self._ensure_screen_on()
+        time.sleep(0.4)
+        return self._dump_once()
+
+    def _header_album_is(self, name: str) -> bool:
+        source = self._dump_source()
+        if not source:
+            return False
+        return _picker_header_album(source) == name
+
+    def _switch_to_staging_album(self) -> ActionResult:
+        """Open the album dropdown and enter the isolated staging album.
+
+        Must happen before any checkbox tap. 最近项目 and Camera both lead
+        with tiles that are not the staged file (downloads lab photo /
+        private family photos, 2026-09-21).
+        """
+        if self._header_album_is(self._GALLERY_ALBUM):
+            return ActionResult(True, "picker already on %s" % self._GALLERY_ALBUM)
+        opened = self._open_album_dropdown()
+        if not opened.success:
+            return opened
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            if self._uia2_widget_exists("text", self._GALLERY_ALBUM):
+                tap = self._tap_with_clickable_parent(
+                    {
+                        "selector": (
+                            'uiautomator:new UiSelector().text("%s")'
+                            % self._GALLERY_ALBUM,
+                        )
+                    }
+                )
+                if tap.success:
+                    settled = time.time() + 4.0
+                    while time.time() < settled:
+                        if self._header_album_is(self._GALLERY_ALBUM):
+                            return ActionResult(
+                                True, "switched picker to %s" % self._GALLERY_ALBUM
+                            )
+                        time.sleep(0.3)
+            self._scroll_album_list()
+            time.sleep(0.4)
+        header = _picker_header_album(self._dump_source()) or "?"
+        return ActionResult(
+            False,
+            "pick_photos: could not switch to %s (header=%s)"
+            % (self._GALLERY_ALBUM, header),
+        )
+
+    def _open_album_dropdown(self) -> ActionResult:
+        source = self._dump_source()
+        header = _picker_header_album(source) if source else None
+        labels = []
+        if header:
+            labels.append(header)
+        for label in self._ALBUM_DROPDOWN_CANDIDATES:
+            if label not in labels:
+                labels.append(label)
+        tap = self._tap_with_clickable_parent(
+            {
+                "selector": tuple(
+                    'uiautomator:new UiSelector().text("%s")' % label
+                    for label in labels
+                )
+            }
+        )
+        if not tap.success:
+            return ActionResult(
+                False, "pick_photos: album dropdown not found: %s" % tap.message
+            )
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if self._uia2_widget_exists("text", self._GALLERY_ALBUM):
+                return ActionResult(True, "album dropdown open")
+            if self._uia2_widget_exists("text", "Camera") or self._uia2_widget_exists(
+                "text", "downloads"
+            ):
+                return ActionResult(True, "album dropdown open")
+            time.sleep(0.3)
+        return ActionResult(False, "pick_photos: album dropdown did not open")
+
+    def _scroll_album_list(self) -> None:
+        driver = getattr(self._session, "driver", None)
+        swipe = getattr(driver, "swipe", None)
+        if not callable(swipe):
+            return
+        try:
+            swipe(540, 1600, 540, 800, 0.3)
+        except Exception as exc:
+            _log_swallowed("uia2 album list swipe", exc)
+
+    def _pick_photo_tile(self, thumb_selector: Any, index: int) -> ActionResult:
+        """Select photo-tile ``index`` via the checkbox, skipping videos.
+
+        2026-09 最近项目 lays videos first (``ugc_album_item_video_thumbnail_image``)
+        then photos. Tapping ``photo_imageView`` opens a preview sheet; the
+        real select hit target is ``ugc_album_item_select_layout``. Prefer
+        that resourceId, then photo_imageView, then className. A class-only
+        ImageView.instance(0) hits a video. The kit translator rejects
+        instance() chains, so drive u2 directly. Success requires the badge
+        to show a selection number — otherwise 下一步 closes with 0 photos.
+        """
+        resource_ids: List[str] = []
+        class_name = None
+        for candidate in as_selector_list(thumb_selector) if thumb_selector else []:
+            if not isinstance(candidate, str):
+                continue
+            if 'resourceId("' in candidate:
+                rid = candidate.split('resourceId("', 1)[1].split('")', 1)[0]
+                if rid and rid not in resource_ids:
+                    resource_ids.append(rid)
+            elif class_name is None and 'className("' in candidate:
+                class_name = candidate.split('className("', 1)[1].split('")', 1)[0]
+        ordered: List[str] = []
+        for rid in (_PHOTO_SELECT_RESOURCE_ID, _PHOTO_IMAGE_RESOURCE_ID):
+            if rid in resource_ids:
+                ordered.append(rid)
+        for rid in resource_ids:
+            if rid not in ordered:
+                ordered.append(rid)
+        lookups = [{"resourceId": rid, "instance": index} for rid in ordered]
+        if not lookups and class_name:
+            lookups = [{"className": class_name, "instance": index}]
+        if not lookups:
+            lookups = [{"resourceId": _PHOTO_SELECT_RESOURCE_ID, "instance": index}]
+        last_miss = "photo tile instance %d absent" % index
+        for lookup in lookups:
+            try:
+                widget = self._session.driver(**lookup)
+                if not bool(getattr(widget, "exists", False)):
+                    continue
+                widget.click()
+            except Exception as exc:
+                return ActionResult(False, "photo tile tap failed: %s" % exc)
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                if self._photo_tile_is_selected(index):
+                    return ActionResult(True, "selected photo tile %d" % index)
+                time.sleep(0.3)
+            last_miss = "photo tile %d was not selected" % index
+            break
+        return ActionResult(False, last_miss)
+
+    def _photo_tile_is_selected(self, index: int) -> bool:
+        driver = getattr(self._session, "driver", None)
+        if not callable(driver):
+            return True
+        try:
+            badge = driver(
+                resourceId=_PHOTO_SELECT_BADGE_RESOURCE_ID, instance=index
+            )
+            if not bool(getattr(badge, "exists", False)):
+                return False
+            info = getattr(badge, "info", None)
+            if callable(info):
+                info = info()
+            text = ""
+            if isinstance(info, dict):
+                text = str(info.get("text") or "")
+            return bool(text.strip().isdigit())
+        except Exception:
+            return False
+
+    def _confirm_picked_photos(self, confirm_selector: Any) -> ActionResult:
+        """Advance picker confirm (下一步) then dish-edit confirm (确定).
+
+        2026-09 Picasso: 「下一步」/「确定」 are non-clickable TextViews; kit
+        tap on the label reports success but the parent FrameLayout never
+        receives it (same as 写评价 / 添加图/视频). Wait for the chrome after
+        the tile tap — the bottom bar inflates after selection — then tap
+        the clickable ancestor.
+        """
+        candidates = as_selector_list(confirm_selector) if confirm_selector else []
+        tapped: List[str] = []
+        for _ in range(2):
+            hit = None
+            deadline = time.time() + 6.0
+            while time.time() < deadline and hit is None:
+                for candidate in candidates:
+                    translated = translate_uiautomator_selector(candidate)
+                    if translated is None:
+                        continue
+                    _by, value = translated
+                    if value in tapped:
+                        continue
+                    if not self._uia2_widget_exists(_by, value):
+                        continue
+                    result = self._tap_with_clickable_parent({"selector": candidate})
+                    if not result.success:
+                        continue
+                    gone_until = time.time() + 3.0
+                    while time.time() < gone_until:
+                        if not self._uia2_widget_exists(_by, value):
+                            hit = value
+                            break
+                        time.sleep(0.3)
+                    if hit is not None:
+                        break
+                if hit is None:
+                    time.sleep(0.4)
+            if hit is None:
+                break
+            tapped.append(hit)
+            time.sleep(0.6)
+        if not tapped:
+            return ActionResult(False, "pick_photos: confirm not found")
+        return ActionResult(
+            True, "pick_photos: confirmed via %s" % " -> ".join(tapped)
+        )
+
+    def _uia2_widget_exists(self, by: str, value: str) -> bool:
+        driver = getattr(self._session, "driver", None)
+        if not callable(driver):
+            return True
+        kwargs = {
+            "text": {"text": value},
+            "text-contains": {"textContains": value},
+            "description": {"description": value},
+            "description-contains": {"descriptionContains": value},
+            "id": {"resourceId": value},
+            "class": {"className": value},
+        }.get(by)
+        if kwargs is None:
+            return True
+        try:
+            return bool(getattr(driver(**kwargs), "exists", False))
+        except Exception as exc:
+            # Fail closed: a driver hiccup must not read as "widget is gone",
+            # or the flow would believe a cleared tile/photo it never saw.
+            _log_swallowed("uia2 widget_exists(%s:%s)" % (by, value), exc)
+            return True
 
     def _retry_after_manual_window(
         self, action_name: str, kwargs: Dict[str, Any], failure: ActionResult
@@ -1225,7 +3349,9 @@ class DianpingUia2Session:
             while time.time() < deadline:
                 time.sleep(min(5.0, max(1.0, deadline - time.time())))
                 attempt += 1
-                if action_name in {"tap", "type_text", "wait_for_element"}:
+                if action_name == "tap":
+                    retry = self._tap_with_clickable_parent(kwargs)
+                elif action_name in {"type_text", "wait_for_element"}:
                     retry = self._with_translated_candidates(action_name, kwargs)
                 else:
                     retry = self._session.execute_action(action_name, **kwargs)
@@ -1246,15 +3372,17 @@ class DianpingUia2Session:
             self._manual_window_active = False
 
     def _dismiss_dialogs(self, **kwargs: Any) -> ActionResult:
+        if dish_edit_is_open(self._hierarchy_source()):
+            return ActionResult(True, "dismiss_dialogs skipped; dish-edit open")
         selector = kwargs.get("selector")
-        max_attempts = int(kwargs.get("max_attempts", 3) or 3)
+        max_attempts = _numeric_parameter(kwargs, "max_attempts", 3, cast=int, minimum=1)
         candidates = []
         for candidate in as_selector_list(selector) if selector is not None else []:
             translated = translate_uiautomator_selector(candidate)
             if translated is not None:
                 candidates.append(translated)
         dismissed = 0
-        for _ in range(max(max_attempts, 1)):
+        for _ in range(max_attempts):
             hit = False
             for by, value in candidates:
                 result = self._session.execute_action("tap", selector=value, by=by)
@@ -1288,6 +3416,8 @@ def _connect_uia2(udid: Optional[str]):
 
 def build_uia2_session_factory(
     config: DianpingDeviceConfig,
+    *,
+    slider_solver: Optional[Callable[[Any], Any]] = None,
 ) -> Callable[[], DianpingUia2Session]:
     """Zero-arg factory connecting over adb directly (no Appium server)."""
 
@@ -1310,6 +3440,7 @@ def build_uia2_session_factory(
                 artifact_root=Path(config.artifact_root),
             ),
             captcha_window_seconds=config.captcha_window_seconds,
+            slider_solver=slider_solver,
         )
 
     return factory

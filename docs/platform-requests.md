@@ -78,14 +78,15 @@
 - slidex `visual.challenge`/solve 已有 `slider_captcha` 与 `android_screenshot_bytes` 枚举与集成壳，但 `VisionContext.ANDROID_SCREENSHOT_BYTES` 在 `VisualChallengeSolver._solve_slider` 分派中落入 `unsupported_slider_context`
 
 ## 需要的公共能力
-- slidex 提供纯图像求解路径：android 截图（bytes）→ 缺口 x 偏移（`gap_offset_px`，设备像素），不依赖浏览器上下文
-- 结果经 `CapabilityResult.data["gap_offset_px"]` 返回（现有 `slidex.integrations.automation_kit` 透传即可）
+- slidex 提供纯图像求解路径：android 截图（bytes）→ 缺口左缘 x（`gap_x` / `distance_px`，截图像素），不依赖浏览器上下文
+- 结果经 `CapabilityResult.data["metadata"]` 返回（`gap_x` / `distance_px`，`slidex.integrations.automation_kit` 透传）；app 侧 `live._build_slider_solver` 兼容旧 `gap_offset_px`（`_first("gap_x","distance_px")` 兜底）
 
 ## 为什么不能在 app 内解决
 - 缺口识别是视觉能力，属 slidex provider 域；app 仓不实现视觉算法
 
 ## 验收
 - `--enable-slidex` 下真实滑块触发时，dianping session 守卫完成「截图→求解→拖动→重试动作」闭环（dianping 侧管道已于 `e44078d` 就绪，含无 solver 的确定性失败路径）
+- **2026-09-23 状态**：① slidex 侧 blocker 已关闭（`VisionContext.ANDROID_SCREENSHOT_BYTES` 并入 `_IMAGE_SLIDER_CONTEXTS` 纯图像分派，真实点评滑块截图实解 `gap_x=363`）；② app 侧桥接已接受 `gap_x`（绝对缺口 → 拖拽距离 = `(gap_x - 句柄_start_x) × distance_scale`）；③ **生产 uia2 路径补齐守卫**：`DianpingUia2Session` 此前无滑块守卫、`build_uia2_session_factory` 丢弃 `slider_solver`，导致 `--enable-slidex` 在 uia2（生产发布驱动）下空转 —— 已抽共享 `_slider_solution_params`/`_slider_drag_distance` 并给 uia2 会话接上守卫、工厂透传 solver。真机实测（OnePlus 7T / uia2）：求解器已挂上，真机 2.36MB 截图经 slidex 纯图像返回 `gap_x=445`；无滑块时 `SLIDER_DETECTED=False`、手柄未定位，不误触发。**尚待**：真实风控滑块出现时的「拖动→重试」闭环（需走进评价流程触发风控）
 
 ## 应用侧过渡策略
 - 无 solver 或求解失败：动作确定性失败并留证（截图+page_source），提示人工处理

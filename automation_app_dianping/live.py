@@ -24,10 +24,26 @@ def require_live_enabled(env: Optional[dict] = None) -> None:
         )
 
 
-def reject_uia2_publish(env: Optional[dict] = None) -> None:
-    """Publish parity on uia2 landed (dialogs, search, label-anchored
-    rating); the guard is retired. Kept as a no-op call site so older
-    tooling referencing it does not break."""
+def require_uia2_publish(
+    env: Optional[dict] = None,
+    session_factory: Optional[Callable[[], Any]] = None,
+) -> None:
+    """Publish fails closed on a non-uia2 driver.
+
+    README: production publish runs ``DIANPING_DRIVER=uia2``; the Appium flow
+    wedges UiAutomation on publish, so an explicit Appium publish is refused
+    rather than silently driven. An injected ``session_factory`` (tests,
+    dry-run) is left alone — the caller supplied a concrete driver already.
+    """
+    if session_factory is not None:
+        return
+    source = env if env is not None else os.environ
+    selected = str(source.get("DIANPING_DRIVER") or "uia2").strip().lower()
+    if selected != "uia2":
+        raise ValueError(
+            "publish requires DIANPING_DRIVER=uia2 (got %r); the Appium flow "
+            "wedges UiAutomation" % selected
+        )
 
 
 def resolve_session_factory(
@@ -47,9 +63,14 @@ def resolve_session_factory(
 def _build_slider_solver(composition) -> Callable[[Any], Any]:
     """Build the session-level slider solver on top of the visual capability.
 
-    Returns an async callable (screenshot bytes -> {"gap_offset_px": int});
-    the session bridges the awaitable onto a worker thread because actions
-    run inside the runtime event loop.
+    Returns an async callable (screenshot bytes -> {"gap_x": int} or
+    {"gap_offset_px": int}); the session bridges the awaitable onto a worker
+    thread because actions run inside the runtime event loop.
+
+    slidex's pure-image path (android_screenshot_bytes) reports ``gap_x`` /
+    ``distance_px`` — the gap's left edge in screenshot pixels — while older
+    providers reported a ready-made ``gap_offset_px``. Both are passed
+    through; the session picks the one it got.
     """
     from automation_core.capabilities import CapabilityRequest
     from automation_core.execution import ExecutionContext
@@ -81,12 +102,24 @@ def _build_slider_solver(composition) -> Callable[[Any], Any]:
                 % (getattr(result, "error_code", None) or "unknown")
             )
         data = dict(getattr(result, "data", {}) or {})
-        offset = data.get("gap_offset_px")
-        if offset is None:
-            offset = (data.get("metadata") or {}).get("gap_offset_px")
-        if offset is None:
-            raise RuntimeError("slidex slider solve returned no gap_offset_px")
-        return {"gap_offset_px": int(offset)}
+        metadata = dict(data.get("metadata") or {})
+
+        def _first(*keys):
+            for source in (data, metadata):
+                for key in keys:
+                    if source.get(key) is not None:
+                        return source[key]
+            return None
+
+        offset = _first("gap_offset_px")
+        if offset is not None:
+            return {"gap_offset_px": int(offset)}
+        gap_x = _first("gap_x", "distance_px")
+        if gap_x is None:
+            raise RuntimeError(
+                "slidex slider solve returned no gap_x/gap_offset_px"
+            )
+        return {"gap_x": int(gap_x)}
 
     return solve
 
@@ -123,6 +156,41 @@ def build_live_smoke_workflow(
     )
 
 
+def _resolve_publish_photos(
+    photos,
+    *,
+    shop_name: str,
+    slug: str = "",
+    data_dir: str = "data",
+    env: Optional[dict] = None,
+) -> list:
+    """Choose the publish photo list by the documented priority chain.
+
+    An explicitly authored photo list (any non-default path) is kept as-is.
+    An empty or default-filled list is resolved: newest staged photo under
+    ``data/photos/<slug>/`` → CPA ``gpt-image-2`` generation → the fixed
+    default photo. ``DIANPING_PHOTO_RESOLVE=0`` pins the default photo.
+    """
+    from automation_app_dianping.config import default_review_photos
+    from automation_app_dianping.photos import (
+        resolve_review_photos,
+        resolve_review_photos_enabled,
+    )
+
+    if photos:
+        canonical = set(default_review_photos())
+        if any(str(path) not in canonical for path in photos):
+            return list(photos)
+    if not resolve_review_photos_enabled(env):
+        return default_review_photos()
+    return resolve_review_photos(
+        slug=slug,
+        shop_name=shop_name,
+        data_dir=data_dir,
+        env=env,
+    )
+
+
 def build_live_workflow(
     *,
     session_factory: Optional[Callable[[], Any]] = None,
@@ -139,7 +207,7 @@ def build_live_workflow(
     env: Optional[dict] = None,
 ):
     require_live_enabled(env)
-    reject_uia2_publish(env)
+    require_uia2_publish(env, session_factory=session_factory)
     from automation_runner import WorkflowContext, WorkflowOptions
     from automation_app_dianping.composition import (
         build_composition,
@@ -156,9 +224,17 @@ def build_live_workflow(
             raise FileNotFoundError("draft not found: %s" % draft_id)
         assert_publish_allowed(draft=draft, config=config, data_dir=Path(data_dir))
         parameters = draft_to_publish_parameters(draft)
+        parameters["photos"] = _resolve_publish_photos(
+            parameters.get("photos"),
+            shop_name=parameters.get("shop_name") or draft.shop_name,
+            slug=draft.shop_slug,
+            data_dir=data_dir,
+            env=env,
+        )
     else:
         if not shop_name or not content:
             raise ValueError("live publish requires draft_id or shop_name+content")
+
         parameters = {
             "mode": "publish",
             "shop_name": shop_name,
@@ -167,7 +243,12 @@ def build_live_workflow(
             # from these values, and a positive review at 4 stars reads
             # incoherently on the public page.
             "ratings": ratings or {"taste": 5, "environment": 5, "service": 5},
-            "photos": list(photos or []),
+            "photos": _resolve_publish_photos(
+                photos,
+                shop_name=shop_name,
+                data_dir=data_dir,
+                env=env,
+            ),
         }
 
     composition = build_composition(enable_slidex=enable_slidex)

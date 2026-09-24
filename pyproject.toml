@@ -21,6 +21,11 @@ live = [
     "uiautomator2>=3,<4",
     "adbutils>=2.9.1",
 ]
+# Optional visual provider. PyPI name `slidex` is an unrelated PPTX library;
+# pin dengyie/slidex by git SHA (Python >=3.10; keep off the 3.8 default CI job).
+slidex = [
+    "slidex @ git+https://github.com/dengyie/slidex.git@288f554",
+]
 
 # Local Poetry path dependency is developer convenience only.
 # Packaging/build backend remains setuptools with [project] metadata.
@@ -69,7 +74,6 @@ source = ["automation_app_dianping"]
 omit = [
     "*/tests/*",
     "*/__init__.py",
-    "*/cli.py",
     "*/__main__.py",
 ]
 

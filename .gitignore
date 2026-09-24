@@ -10,6 +10,12 @@ data/state.json
 data/config.json
 data/photos/_downloaded/
 data/photos/prepared/
+# 店铺照片（搜到 / 生图）只留本地，不入库；mock 夹具除外
+data/photos/*
+!data/photos/mock-shop-001/
+# live 失败转储（capture_artifact 在 cwd 落盘时）
+fail-*.xml
+fail-*.png
 data/captcha_debug/
 data/publish-checklist.md
 data/publish-checklist.json
