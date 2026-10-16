@@ -736,6 +736,16 @@ _HOME_SEARCH_XML = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
 </hierarchy>
 """
 
+# Home page as it really renders (bottom tab bar present); used by the
+# 我的→待评价 navigation tests where the tab must be tappable.
+_HOME_WITH_TABS_XML = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy>
+  <node resource-id="com.dianping.v1:id/title_search_bar" class="android.widget.FrameLayout" clickable="true" bounds="[48,88][900,172]" content-desc="搜索" />
+  <node text="首页" class="android.widget.TextView" clickable="false" bounds="[0,2300][216,2380]" />
+  <node text="我的" class="android.widget.TextView" clickable="false" bounds="[864,2300][1008,2380]" />
+</hierarchy>
+"""
+
 # Staged hierarchies the home→search→shop→editor flow walks through. Each
 # marker (keyword field, 商户 header, shop name, 写评价, 添加图/视频) only
 # appears on its own page, so _wait_for_marker really has to poll the dump.
@@ -2694,3 +2704,150 @@ def test_uia2_widget_exists_reports_absent_and_present(monkeypatch):
 
     session_present, _ = _make_uia2_session(monkeypatch, _KitPresent())
     assert session_present._uia2_widget_exists("text", "Camera") is True
+
+
+_PENDING_LIST_XML = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy>
+  <node text="待评价(2)" class="android.widget.TextView" clickable="true" bounds="[60,300][400,380]" />
+  <node text="赤上烧肉酒场(娄山关路店)" class="android.widget.TextView" clickable="false" bounds="[40,600][600,660]" />
+  <node text="评价" class="android.widget.Button" clickable="true" bounds="[880,590][1040,670]" />
+  <node text="细记港九宵夜大牌档(虹桥南丰城店)" class="android.widget.TextView" clickable="false" bounds="[40,900][600,960]" />
+  <node text="评价" class="android.widget.Button" clickable="true" bounds="[880,890][1040,970]" />
+</hierarchy>
+"""
+
+# Same pending list but the target shop is absent — the fallback path must
+# back out of it instead of tapping an unrelated order's CTA.
+_PENDING_LIST_OTHER_SHOP_XML = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy>
+  <node text="待评价(1)" class="android.widget.TextView" clickable="true" bounds="[60,300][400,380]" />
+  <node text="味香斋(雁荡路店)" class="android.widget.TextView" clickable="false" bounds="[40,600][600,660]" />
+  <node text="评价" class="android.widget.Button" clickable="true" bounds="[880,590][1040,670]" />
+</hierarchy>
+"""
+
+
+def test_uia2_pending_review_row_rect_anchors_cta_to_shop_row():
+    from automation_app_dianping.session import pending_review_row_rect
+
+    rect = pending_review_row_rect(_PENDING_LIST_XML, "赤上烧肉酒场(娄山关路店)")
+    assert rect == {"x": 880, "y": 590, "width": 160, "height": 80}
+
+    # The second row's CTA must be returned for the other shop.
+    other = pending_review_row_rect(_PENDING_LIST_XML, "细记港九宵夜大牌档(虹桥南丰城店)")
+    assert other == {"x": 880, "y": 890, "width": 160, "height": 80}
+
+    assert pending_review_row_rect(_PENDING_LIST_XML, "不存在的店") is None
+    assert pending_review_row_rect("", "赤上烧肉酒场") is None
+
+
+def test_uia2_navigate_prefers_pending_review_entry(monkeypatch):
+    # 我的 tab → pending list → shop CTA → editor. The first dump is the
+    # home page (has the 我的 tab label), each click advances the page.
+    pages = [
+        _HOME_WITH_TABS_XML,
+        _PENDING_LIST_XML,
+        _PENDING_LIST_XML,
+        _EDITOR_ADD_PHOTO_XML,
+        _EDITOR_ADD_PHOTO_XML,
+    ]
+
+    class Device:
+        def __init__(self):
+            self.clicks = []
+            self.step = 0
+            self.presses = []
+
+        def dump_hierarchy(self):
+            return pages[min(self.step, len(pages) - 1)]
+
+        def click(self, x, y):
+            self.clicks.append((int(x), int(y)))
+            self.step = min(self.step + 1, len(pages) - 1)
+
+        def press(self, key):
+            self.presses.append(key)
+
+    device = Device()
+    kit = FakeKitUia2()
+    kit.driver = device
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+
+    result = session.execute_action(
+        "navigate_to_review_editor",
+        shop_name="赤上烧肉酒场(娄山关路店)",
+        write_selector=('uiautomator:new UiSelector().text("写评价")',),
+        search_bar=("id:com.dianping.v1:id/title_search_bar",),
+        search_input=("id:com.dianping.v1:id/search_keyword_edit",),
+    )
+
+    assert result.success, result.message
+    assert "via 我的/待评价" in result.message
+    # CTA centre: (880+1040)//2, (590+670)//2
+    assert (960, 630) in device.clicks
+    # Search path never engaged: no type_text through the kit.
+    assert "type_text" not in [name for name, _ in kit.calls]
+
+
+def test_uia2_navigate_falls_back_to_search_when_shop_not_pending(monkeypatch):
+    # The pending list exists but only carries an unrelated shop; the flow
+    # must press BACK out of it and complete navigation via home search.
+    pages = [
+        _HOME_WITH_TABS_XML,
+        _PENDING_LIST_OTHER_SHOP_XML,  # 我的 tab tapped → pending list
+        _PENDING_LIST_OTHER_SHOP_XML,  # entry tap lands on the same list
+        _HOME_WITH_TABS_XML,           # BACK unwinds to home, search proceeds
+        _SEARCH_BOX_XML,
+        _RESULTS_XML,
+        _SHOP_WRITE_REVIEW_XML,
+        _EDITOR_ADD_PHOTO_XML,
+    ]
+
+    class Device:
+        def __init__(self):
+            self.clicks = []
+            self.step = 0
+            self.presses = []
+
+        def dump_hierarchy(self):
+            return pages[min(self.step, len(pages) - 1)]
+
+        def click(self, x, y):
+            self.clicks.append((int(x), int(y)))
+            self.step = min(self.step + 1, len(pages) - 1)
+
+        def press(self, key):
+            self.presses.append(key)
+            self.step = min(self.step + 1, len(pages) - 1)
+
+    device = Device()
+
+    class Kit(FakeKitUia2):
+        def execute_action(self, action_name, **kwargs):
+            result = super().execute_action(action_name, **kwargs)
+            if result.success and action_name in ("tap", "press_key"):
+                device.step = min(device.step + 1, len(pages) - 1)
+            return result
+
+    kit = Kit()
+    kit.driver = device
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+
+    result = session.execute_action(
+        "navigate_to_review_editor",
+        shop_name="细记港九宵夜大牌档(虹桥南丰城店)",
+        write_selector=('uiautomator:new UiSelector().text("写评价")',),
+        search_bar=("id:com.dianping.v1:id/title_search_bar",),
+        search_input=("id:com.dianping.v1:id/search_keyword_edit",),
+        search_confirm=('uiautomator:new UiSelector().text("搜索")',),
+        search_results_marker=('uiautomator:new UiSelector().text("商户")',),
+        shop_result=('uiautomator:new UiSelector().textContains("细记港九")',),
+    )
+
+    assert result.success, result.message
+    assert "via search" in result.message
+    # The pending list was entered and then unwound with BACK.
+    assert "back" in device.presses
+    assert "type_text" in [name for name, _ in kit.calls]

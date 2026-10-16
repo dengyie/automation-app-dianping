@@ -1442,6 +1442,65 @@ def shop_page_has_review_entry(source: str, shop_name: str) -> bool:
     )
 
 
+_PENDING_CTA_LABELS = ("评价", "写评价", "评价订单")
+
+
+def pending_review_row_rect(
+    source: str, shop_name: str
+) -> Optional[Dict[str, int]]:
+    """Tap target for a 待评价 row's review CTA on the pending list.
+
+    The list can show several orders, so a tap must be anchored to the
+    target shop: find the shop-name label whose vertical band contains an
+    评价-family button and return that button's rect (never the shop label
+    itself — tapping the row body opens the order/shop page, not the
+    editor). Exact name matches win over partial ones.
+    """
+    name = str(shop_name or "").strip()
+    if not source or not name:
+        return None
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return None
+
+    ctas: List[Tuple[Dict[str, int], str]] = []
+    for node in root.iter("node"):
+        text = (node.get("text") or "").strip()
+        if not text:
+            continue
+        if any(text == label or (label != "评价" and label in text)
+               for label in _PENDING_CTA_LABELS):
+            rect = _bounds_rect(node.get("bounds") or "")
+            if rect is not None:
+                ctas.append((rect, text))
+    if not ctas:
+        return None
+
+    for exact in (True, False):
+        name_rect = None
+        for node in root.iter("node"):
+            text = (node.get("text") or "").strip()
+            if (text == name) if exact else (bool(text) and name in text):
+                candidate = _bounds_rect(node.get("bounds") or "")
+                if candidate is not None:
+                    name_rect = candidate
+                    break
+        if name_rect is None:
+            continue
+        name_mid = name_rect["y"] + name_rect["height"] / 2
+        best: Optional[Tuple[Dict[str, int], int]] = None
+        for rect, _text in ctas:
+            cta_mid = rect["y"] + rect["height"] / 2
+            if abs(cta_mid - name_mid) <= max(name_rect["height"], rect["height"]):
+                distance = abs(cta_mid - name_mid)
+                if best is None or distance < best[1]:
+                    best = (rect, distance)
+        if best is not None:
+            return best[0]
+    return None
+
+
 def review_editor_is_open(source: str) -> bool:
     """True when Dianping is already on the Picasso review editor.
 
@@ -2213,6 +2272,18 @@ class DianpingUia2Session:
                     True, "navigate_to_review_editor via restored shop page"
                 )
             return tap
+        # Preferred entry (2026-10-16): the 我的 tab's 待评价 list — reviews
+        # started there are tied to the actual order. Any miss (tab absent,
+        # target shop not pending) backs out and falls through to the
+        # home-search path below.
+        pending = self._navigate_via_pending_review(shop_name)
+        if pending.success:
+            return pending
+        print(
+            "[dianping-uia2] navigate: pending-review entry unavailable (%s); "
+            "falling back to search" % pending.message,
+            flush=True,
+        )
         # A relaunch can restore the app mid-search, sitting on the results
         # page that already shows the target row. The search-bar selectors are
         # not on that page and the kit wait/tap report success for absent
@@ -2253,6 +2324,146 @@ class DianpingUia2Session:
             return wait
         print("[dianping-uia2] navigate: results page ready", flush=True)
         return self._advance_from_search_results(shop_name, kwargs)
+
+    _PENDING_TAB = ('uiautomator:new UiSelector().text("我的")',)
+    _PENDING_ENTRY = (
+        'uiautomator:new UiSelector().textContains("待评价")',
+        'uiautomator:new UiSelector().textContains("待点评")',
+    )
+    _PENDING_ROW_CTA = (
+        'uiautomator:new UiSelector().text("评价")',
+        'uiautomator:new UiSelector().text("写评价")',
+        'uiautomator:new UiSelector().textContains("评价")',
+    )
+    _EDITOR_OPEN_MARKER = (
+        'uiautomator:new UiSelector().textContains("添加图")',
+        'uiautomator:new UiSelector().text("发布")',
+    )
+
+    def _marker_present_now(self, candidates: Any) -> bool:
+        """True when a candidate already exists in the current hierarchy.
+
+        The tap helpers fall back to a kit tap when the dump lookup misses,
+        and that tap fires blind at the page it cannot see — so gating the
+        pending-review path on this check keeps an absent 我的 tab from
+        costing a stray click plus the marker wait.
+        """
+        source = self._hierarchy_source()
+        if not source:
+            return False
+        try:
+            root = ET.fromstring(source)
+        except (ET.ParseError, TypeError):
+            return False
+        for candidate in as_selector_list(candidates) if candidates is not None else []:
+            translated = translate_uiautomator_selector(candidate)
+            if translated is None:
+                continue
+            by, value = translated
+            if any(_node_matches_selector(node, by, value) for node in root.iter("node")):
+                return True
+        return False
+
+    def _navigate_via_pending_review(self, shop_name: str) -> ActionResult:
+        """Reach the review editor through 我的 → 待评价 → the shop's row CTA.
+
+        Reviews opened from the pending list are tied to the actual order, so
+        this entry is preferred over home search (2026-10-16). Every step
+        waits on a real hierarchy marker; on any miss the page stack is
+        unwound with BACK and a False result hands control back to the
+        search-based path.
+        """
+        if not self._marker_present_now(self._PENDING_TAB):
+            return ActionResult(False, "我的 tab not on the current page")
+        tap = self._tap_with_clickable_parent({"selector": self._PENDING_TAB})
+        if not tap.success:
+            return ActionResult(False, "我的 tab not tapped: %s" % tap.message)
+        wait = self._wait_for_marker(self._PENDING_ENTRY, 8.0)
+        if not wait.success:
+            self._press_back_quietly()
+            return ActionResult(False, "待评价 entry not found on 我的 tab")
+        tap = self._tap_with_clickable_parent({"selector": self._PENDING_ENTRY})
+        if not tap.success:
+            self._press_back_quietly()
+            return ActionResult(False, "待评价 tap failed: %s" % tap.message)
+        print("[dianping-uia2] navigate: pending-review list open", flush=True)
+
+        # The pending list shows consumed orders, not necessarily the target
+        # shop; only commit when the shop's row CTA is actually on screen.
+        row = self._wait_for_pending_shop_row(shop_name, 8.0)
+        if not row.success:
+            self._press_back_quietly()
+            return ActionResult(
+                False, "shop not in pending list: %s" % shop_name
+            )
+        tap = self._tap_pending_shop_row(shop_name)
+        if not tap.success:
+            self._press_back_quietly()
+            return tap
+        print(
+            "[dianping-uia2] navigate: pending row CTA tapped (%s)" % tap.message,
+            flush=True,
+        )
+        opened = self._wait_for_marker(self._EDITOR_OPEN_MARKER, 15.0)
+        if not opened.success:
+            self._press_back_quietly()
+            return ActionResult(
+                False, "pending-review CTA did not open the editor"
+            )
+        return ActionResult(
+            True, "navigate_to_review_editor via 我的/待评价",
+            data={"shop": shop_name},
+        )
+
+    def _wait_for_pending_shop_row(self, shop_name: str, timeout: float):
+        """Poll for the target shop's 评价 CTA inside the pending list.
+
+        The CTA is a small button beside the shop row; requiring both the
+        shop-name text and an评价-family button in the same window avoids
+        tapping an评价 entry for a different order.
+        """
+        deadline = time.time() + float(timeout)
+        while time.time() < deadline:
+            source = self._hierarchy_source()
+            rect = pending_review_row_rect(source, shop_name)
+            if rect is not None:
+                return ActionResult(
+                    True,
+                    "pending row ready",
+                    data=dict(rect),
+                )
+            time.sleep(0.5)
+        return ActionResult(False, "pending row not on screen: %s" % shop_name)
+
+    def _tap_pending_shop_row(self, shop_name: str) -> ActionResult:
+        driver = getattr(self._session, "driver", None)
+        click = getattr(driver, "click", None) if driver is not None else None
+        if not callable(click):
+            return ActionResult(False, "no coordinate click available")
+        source = self._hierarchy_source()
+        rect = pending_review_row_rect(source, shop_name)
+        if rect is None:
+            return ActionResult(False, "pending row vanished before tap")
+        x = rect["x"] + rect["width"] // 2
+        y = rect["y"] + rect["height"] // 2
+        try:
+            click(int(x), int(y))
+        except Exception as exc:
+            return ActionResult(False, "pending row tap failed: %s" % exc)
+        return ActionResult(
+            True, "pending row CTA tap at (%d, %d)" % (int(x), int(y)),
+            data={"x": int(x), "y": int(y)},
+        )
+
+    def _press_back_quietly(self) -> None:
+        driver = getattr(self._session, "driver", None)
+        press = getattr(driver, "press", None) if driver is not None else None
+        if callable(press):
+            try:
+                press("back")
+            except Exception as exc:
+                _log_swallowed("uia2 press_back unwind", exc)
+        time.sleep(0.8)
 
     def _results_page_open(
         self, source: str, shop_name: str, kwargs: Dict[str, Any]
