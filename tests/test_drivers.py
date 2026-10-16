@@ -1458,6 +1458,87 @@ def test_uia2_pick_photos_fails_when_photo_tile_missing(monkeypatch, tmp_path):
     assert not any(c.get("text") == "下一步" for c in device.clicks)
 
 
+class _FlakyFirstTapDevice(_FakeGalleryDevice):
+    """Swallows the first select_layout tap, like a grid still settling.
+
+    Live 2026-10-16: the tile was visible in the dump yet the first click
+    never produced the selection badge; the retry (same selector) must stick
+    instead of giving up after one miss.
+    """
+
+    def __init__(self, name):
+        super().__init__(name)
+        self.tile_tap_count = 0
+
+    def __call__(self, **kwargs):
+        widget = super().__call__(**kwargs)
+        if kwargs.get("resourceId") == self.SELECT_ID:
+            original = widget._on_click
+
+            def flaky_on_click():
+                # Device-level count: each lookup returns a fresh widget, so
+                # the "first tap swallowed" state must not live per-widget.
+                self.tile_tap_count += 1
+                if self.tile_tap_count >= 2 and original is not None:
+                    original()
+
+            widget._on_click = flaky_on_click
+        return widget
+
+
+def test_uia2_pick_photos_retries_tile_tap_that_does_not_stick(
+    monkeypatch, tmp_path
+):
+    from automation_app_dianping.config import default_selectors
+
+    _install_fast_clock(monkeypatch)
+    photo = _write_jpeg(tmp_path)
+    device = _FlakyFirstTapDevice("IMG99999999_gni.jpg")
+    kit = _PickerKit(device)
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+    selectors = default_selectors()
+
+    result = session.execute_action(
+        "pick_photos",
+        photos=[str(photo)],
+        add_selector=selectors.add_photo,
+        thumbnail_selector=selectors.photo_thumbnail,
+        confirm_selector=selectors.photo_confirm,
+    )
+
+    assert result.success, result.message
+    assert device.tile_tap_count == 2
+    assert 0 in device.selected
+    assert device.album == "DianpingAuto"
+
+
+def test_uia2_pick_photos_reports_tile_reason_in_failure(monkeypatch, tmp_path):
+    """The per-tile reason must survive into the step result message."""
+    from automation_app_dianping.config import default_selectors
+
+    _install_fast_clock(monkeypatch)
+    photo = _write_jpeg(tmp_path)
+    device = _FakeGalleryDevice("IMG99999999_gni.jpg", photo_count=0)
+    kit = _PickerKit(device)
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+    selectors = default_selectors()
+
+    result = session.execute_action(
+        "pick_photos",
+        photos=[str(photo)],
+        add_selector=selectors.add_photo,
+        thumbnail_selector=selectors.photo_thumbnail,
+        confirm_selector=selectors.photo_confirm,
+    )
+
+    assert not result.success
+    assert "attached 0 of 1" in result.message
+    # Diagnostics tell the next live run whether the selector left the tree.
+    assert "select_layout in dump" in result.message
+
+
 def test_uia2_pick_photos_staggers_multi_photo_exif(monkeypatch, tmp_path):
     import io
 
@@ -2726,6 +2807,16 @@ _PENDING_LIST_OTHER_SHOP_XML = """<?xml version='1.0' encoding='UTF-8' standalon
 </hierarchy>
 """
 
+# A warm start on an unrelated inner page (消息): no 我的 tab, no search bar,
+# no editor chrome — navigation must BACK-unwind to home before searching.
+_OTHER_TAB_XML = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy>
+  <node text="消息" class="android.widget.TextView" clickable="false" bounds="[480,120][600,180]" />
+  <node text="系统通知" class="android.widget.TextView" clickable="false" bounds="[60,300][300,360]" />
+  <node text="互动消息" class="android.widget.TextView" clickable="false" bounds="[60,420][300,480]" />
+</hierarchy>
+"""
+
 
 def test_uia2_pending_review_row_rect_anchors_cta_to_shop_row():
     from automation_app_dianping.session import pending_review_row_rect
@@ -2850,4 +2941,80 @@ def test_uia2_navigate_falls_back_to_search_when_shop_not_pending(monkeypatch):
     assert "via search" in result.message
     # The pending list was entered and then unwound with BACK.
     assert "back" in device.presses
+    assert "type_text" in [name for name, _ in kit.calls]
+
+
+def test_uia2_navigate_back_unwinds_warm_start_on_other_tab(monkeypatch):
+    # Live 2026-10-16: a relaunch restored the app on an inner page; the
+    # search-bar wait hard-failed there. Navigation must BACK-unwind to home
+    # and continue via search instead of giving up.
+    pages = [
+        _OTHER_TAB_XML,
+        _HOME_WITH_TABS_XML,           # BACK unwinds to home
+        _SEARCH_BOX_XML,
+        _RESULTS_XML,
+        _SHOP_WRITE_REVIEW_XML,
+        _EDITOR_ADD_PHOTO_XML,
+    ]
+
+    class Device:
+        def __init__(self):
+            self.clicks = []
+            self.step = 0
+            self.presses = []
+
+        def dump_hierarchy(self):
+            return pages[min(self.step, len(pages) - 1)]
+
+        def click(self, x, y):
+            self.clicks.append((int(x), int(y)))
+            self.step = min(self.step + 1, len(pages) - 1)
+
+        def press(self, key):
+            self.presses.append(key)
+            self.step = min(self.step + 1, len(pages) - 1)
+
+    device = Device()
+
+    class Kit(FakeKitUia2):
+        # wait_for_element must really consult the page: the search bar only
+        # exists on home, so its wait fails on the inner page and drives the
+        # BACK unwind.
+        def execute_action(self, action_name, **kwargs):
+            if action_name == "wait_for_element":
+                source = device.dump_hierarchy()
+                by = kwargs.get("by")
+                value = str(kwargs.get("selector") or "")
+                if by == "id":
+                    hit = 'resource-id="%s"' % value in source
+                else:
+                    hit = 'text="%s"' % value in source
+                if not hit:
+                    return ActionResult(False, "not on page: %s" % value)
+                return ActionResult(True, "wait_for_element")
+            result = super().execute_action(action_name, **kwargs)
+            if result.success and action_name in ("tap", "press_key"):
+                device.step = min(device.step + 1, len(pages) - 1)
+            return result
+
+    kit = Kit()
+    kit.driver = device
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+
+    result = session.execute_action(
+        "navigate_to_review_editor",
+        shop_name="细记港九宵夜大牌档(虹桥南丰城店)",
+        write_selector=('uiautomator:new UiSelector().text("写评价")',),
+        search_bar=("id:com.dianping.v1:id/title_search_bar",),
+        search_input=("id:com.dianping.v1:id/search_keyword_edit",),
+        search_confirm=('uiautomator:new UiSelector().text("搜索")',),
+        search_results_marker=('uiautomator:new UiSelector().text("商户")',),
+        shop_result=('uiautomator:new UiSelector().textContains("细记港九")',),
+    )
+
+    assert result.success, result.message
+    assert "via search" in result.message
+    # Exactly one BACK press: the unwind from the inner page to home.
+    assert device.presses == ["back"]
     assert "type_text" in [name for name, _ in kit.calls]

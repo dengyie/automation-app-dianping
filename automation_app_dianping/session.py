@@ -2297,7 +2297,16 @@ class DianpingUia2Session:
             {"selector": kwargs.get("search_bar"), "timeout": 10.0},
         )
         if not wait.success:
-            return wait
+            # Warm starts can land on any page (live 2026-10-16: the 我的 tab
+            # made this wait fail on all 8 search-bar selectors); BACK walks
+            # toward home, where the search bar lives.
+            recovered = self._back_to_home_search(kwargs)
+            if not recovered.success:
+                return wait
+            print(
+                "[dianping-uia2] navigate: BACK unwind reached home search",
+                flush=True,
+            )
         tap = self._tap_with_clickable_parent({"selector": kwargs.get("search_bar")})
         if not tap.success:
             return tap
@@ -2464,6 +2473,31 @@ class DianpingUia2Session:
             except Exception as exc:
                 _log_swallowed("uia2 press_back unwind", exc)
         time.sleep(0.8)
+
+    def _back_to_home_search(self, kwargs: Dict[str, Any]) -> ActionResult:
+        """BACK-unwind a warm start that landed on a non-home page.
+
+        The search bar only exists on home, so a warm start elsewhere (live
+        2026-10-16: the 我的 tab) hard-failed the search-bar wait. A couple of
+        BACK presses reach home; the editor-chrome guard keeps a stray BACK
+        from discarding an open editor.
+        """
+        source = self._hierarchy_source()
+        if (
+            review_editor_is_open(source)
+            or dish_edit_is_open(source)
+            or review_publish_chrome_visible(source)
+        ):
+            return ActionResult(False, "refusing BACK with editor chrome visible")
+        for _ in range(2):
+            self._press_back_quietly()
+            wait = self._with_translated_candidates(
+                "wait_for_element",
+                {"selector": kwargs.get("search_bar"), "timeout": 6.0},
+            )
+            if wait.success:
+                return wait
+        return ActionResult(False, "home search bar not reached via BACK")
 
     def _results_page_open(
         self, source: str, shop_name: str, kwargs: Dict[str, Any]
@@ -2826,12 +2860,21 @@ class DianpingUia2Session:
                 False,
                 "pick_photos: refused to select outside %s" % self._GALLERY_ALBUM,
             )
+        # Live 2026-10-16: the first tile tap right after the album switch did
+        # not stick; give the grid a beat to settle before selecting.
+        time.sleep(0.4)
         thumb_selector = kwargs.get("thumbnail_selector")
         selected = 0
         for index in range(count):
             tap = self._pick_photo_tile(thumb_selector, index)
             if not tap.success:
-                break
+                # Surface the per-tile reason (absent vs not-selected) instead
+                # of discarding it behind a bare count.
+                return ActionResult(
+                    False,
+                    "pick_photos: attached %d of %d photo tile(s): %s"
+                    % (selected, count, tap.message),
+                )
             selected += 1
             time.sleep(0.4)
         if selected != count:
@@ -3437,22 +3480,48 @@ class DianpingUia2Session:
         if not lookups:
             lookups = [{"resourceId": _PHOTO_SELECT_RESOURCE_ID, "instance": index}]
         last_miss = "photo tile instance %d absent" % index
+        attempts = 0
         for lookup in lookups:
+            for _ in range(2):
+                # The grid can still be settling when a tap lands (live
+                # 2026-10-16: the tile was visible in the dump yet the click
+                # never stuck); retry the same selector before falling back to
+                # the next candidate instead of giving up after one miss.
+                try:
+                    widget = self._session.driver(**lookup)
+                    if not bool(getattr(widget, "exists", False)):
+                        last_miss = "photo tile instance %d absent" % index
+                        break
+                    widget.click()
+                except Exception as exc:
+                    return ActionResult(False, "photo tile tap failed: %s" % exc)
+                attempts += 1
+                deadline = time.time() + 3.0
+                while time.time() < deadline:
+                    if self._photo_tile_is_selected(index):
+                        return ActionResult(
+                            True,
+                            "selected photo tile %d (attempt %d)" % (index, attempts),
+                        )
+                    time.sleep(0.3)
+                last_miss = "photo tile %d was not selected (attempt %d)" % (
+                    index,
+                    attempts,
+                )
+        # Live 2026-10-16: the run failed while a later probe found the tile —
+        # record whether the selector is in the tree so the next run tells
+        # "absent from tree" apart from "present but taps did not stick".
+        dump = getattr(self._session.driver, "dump_hierarchy", None)
+        tile_in_dump = None
+        if callable(dump):
             try:
-                widget = self._session.driver(**lookup)
-                if not bool(getattr(widget, "exists", False)):
-                    continue
-                widget.click()
-            except Exception as exc:
-                return ActionResult(False, "photo tile tap failed: %s" % exc)
-            deadline = time.time() + 3.0
-            while time.time() < deadline:
-                if self._photo_tile_is_selected(index):
-                    return ActionResult(True, "selected photo tile %d" % index)
-                time.sleep(0.3)
-            last_miss = "photo tile %d was not selected" % index
-            break
-        return ActionResult(False, last_miss)
+                tile_in_dump = _PHOTO_SELECT_RESOURCE_ID in (dump() or "")
+            except Exception:
+                tile_in_dump = None
+        verdict = "unknown" if tile_in_dump is None else ("yes" if tile_in_dump else "no")
+        return ActionResult(
+            False, "%s (select_layout in dump: %s)" % (last_miss, verdict)
+        )
 
     def _photo_tile_is_selected(self, index: int) -> bool:
         driver = getattr(self._session, "driver", None)
