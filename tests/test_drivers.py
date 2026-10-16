@@ -2946,11 +2946,14 @@ def test_uia2_navigate_falls_back_to_search_when_shop_not_pending(monkeypatch):
 
 def test_uia2_navigate_back_unwinds_warm_start_on_other_tab(monkeypatch):
     # Live 2026-10-16: a relaunch restored the app on an inner page; the
-    # search-bar wait hard-failed there. Navigation must BACK-unwind to home
-    # and continue via search instead of giving up.
+    # search-bar wait hard-failed there. Navigation must BACK-unwind to home,
+    # then still try the preferred pending-review entry before searching.
     pages = [
         _OTHER_TAB_XML,
         _HOME_WITH_TABS_XML,           # BACK unwinds to home
+        _PENDING_LIST_OTHER_SHOP_XML,  # 我的 tab tapped → pending list
+        _PENDING_LIST_OTHER_SHOP_XML,  # entry tap lands on the same list
+        _HOME_WITH_TABS_XML,           # BACK out: target shop not pending
         _SEARCH_BOX_XML,
         _RESULTS_XML,
         _SHOP_WRITE_REVIEW_XML,
@@ -3015,6 +3018,6 @@ def test_uia2_navigate_back_unwinds_warm_start_on_other_tab(monkeypatch):
 
     assert result.success, result.message
     assert "via search" in result.message
-    # Exactly one BACK press: the unwind from the inner page to home.
-    assert device.presses == ["back"]
+    # One BACK for the unwind, one for backing out of the pending list.
+    assert device.presses == ["back", "back"]
     assert "type_text" in [name for name, _ in kit.calls]

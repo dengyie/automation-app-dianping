@@ -2272,18 +2272,6 @@ class DianpingUia2Session:
                     True, "navigate_to_review_editor via restored shop page"
                 )
             return tap
-        # Preferred entry (2026-10-16): the 我的 tab's 待评价 list — reviews
-        # started there are tied to the actual order. Any miss (tab absent,
-        # target shop not pending) backs out and falls through to the
-        # home-search path below.
-        pending = self._navigate_via_pending_review(shop_name)
-        if pending.success:
-            return pending
-        print(
-            "[dianping-uia2] navigate: pending-review entry unavailable (%s); "
-            "falling back to search" % pending.message,
-            flush=True,
-        )
         # A relaunch can restore the app mid-search, sitting on the results
         # page that already shows the target row. The search-bar selectors are
         # not on that page and the kit wait/tap report success for absent
@@ -2307,6 +2295,20 @@ class DianpingUia2Session:
                 "[dianping-uia2] navigate: BACK unwind reached home search",
                 flush=True,
             )
+        # Preferred entry (2026-10-16, user directive): the 我的 tab's 待评价
+        # list — reviews started there are tied to the actual order. It runs
+        # after the page is sane (home), so a warm start on an inner page
+        # still gets the pending path, not just the search fallback. Any miss
+        # (tab absent, target shop not pending) backs out and falls through to
+        # the home-search path below.
+        pending = self._navigate_via_pending_review(shop_name)
+        if pending.success:
+            return pending
+        print(
+            "[dianping-uia2] navigate: pending-review entry unavailable (%s); "
+            "falling back to search" % pending.message,
+            flush=True,
+        )
         tap = self._tap_with_clickable_parent({"selector": kwargs.get("search_bar")})
         if not tap.success:
             return tap
