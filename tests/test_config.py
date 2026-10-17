@@ -125,16 +125,23 @@ def test_write_review_includes_same_day_edit_label():
     assert "编辑评价" in joined
 
 
-def test_default_review_photos_points_at_staged_noodle():
+def test_default_review_photos_points_at_staged_noodle(default_photo, monkeypatch):
+    from automation_app_dianping import config
     from automation_app_dianping.config import (
         DEFAULT_REVIEW_PHOTO,
         default_review_photos,
     )
 
     assert DEFAULT_REVIEW_PHOTO.name == "gni2_pulled.jpg"
-    photos = default_review_photos()
-    assert photos == [str(DEFAULT_REVIEW_PHOTO)]
-    assert DEFAULT_REVIEW_PHOTO.is_file()
+    assert DEFAULT_REVIEW_PHOTO.parent.name == "artifacts"
+    assert default_review_photos() == [str(DEFAULT_REVIEW_PHOTO)]
+
+    # Missing file → no photos (live pick_photos then refuses instead of
+    # grabbing a private gallery tile).
+    monkeypatch.setattr(
+        config, "DEFAULT_REVIEW_PHOTO", DEFAULT_REVIEW_PHOTO.parent / "gone.jpg"
+    )
+    assert default_review_photos() == []
 
 
 def test_photo_selectors_target_photo_tiles_and_two_page_confirm():

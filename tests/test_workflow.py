@@ -390,7 +390,7 @@ def test_publish_steps_include_search_confirm_and_attach_photos_when_given():
     assert "pick_photos" in names
 
 
-def test_publish_steps_default_to_staged_review_photo():
+def test_publish_steps_default_to_staged_review_photo(default_photo):
     from automation_app_dianping.config import DEFAULT_REVIEW_PHOTO
 
     content = "内容足够长用于构造步骤" * 20

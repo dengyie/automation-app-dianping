@@ -430,7 +430,7 @@ def test_resolve_publish_photos_pins_default_when_disabled(tmp_path: Path):
     assert resolved == expected
 
 
-def test_resolve_publish_photos_resolves_default_slot(tmp_path: Path):
+def test_resolve_publish_photos_resolves_default_slot(tmp_path: Path, default_photo):
     from automation_app_dianping.config import DEFAULT_REVIEW_PHOTO
     from automation_app_dianping.live import _resolve_publish_photos
 

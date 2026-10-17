@@ -24,7 +24,7 @@
 ```bash
 python -m pip install -e .
 # 等价于消费发布元数据：
-# automation-kit>=0.3.0,<0.4.0
+# automation-kit>=0.5.0,<0.6.0 + Pillow>=9,<13（照片管线需要 PIL）
 ```
 
 `pyproject.toml` 的 `[project]` 段是发布真相源。
@@ -36,7 +36,8 @@ python -m pip install -e .
 # 需要本机已有 capability 矩阵的 automation-kit 检出
 python -m pip install -e ../automation-kit
 python -m pip install -e . --no-deps
-python -m pip install "pytest>=8,<9" "pytest-cov>=5,<6"
+# --no-deps 跳过 sibling kit 与 Pillow（后者是照片管线的运行时依赖）：
+python -m pip install Pillow "pytest>=8,<9" "pytest-cov>=5,<6"
 ```
 
 可选视觉 provider（钉 **slidex 0.6.3 / `288f554`**；PyPI 名已被无关 PPTX 库占用，必须 git pin）：

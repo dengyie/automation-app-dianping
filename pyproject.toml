@@ -8,6 +8,9 @@ requires-python = ">=3.8,<4.0"
 # Release / CI install surface: published version range only (no sibling path).
 dependencies = [
     "automation-kit>=0.5.0,<0.6.0",
+    # pick_photos stages review images through PIL (EXIF rewrite, alpha flatten).
+    # Python 3.8 resolves to Pillow 10.x via Requires-Python; no 3.9-only cap.
+    "Pillow>=9,<13",
 ]
 
 [project.optional-dependencies]

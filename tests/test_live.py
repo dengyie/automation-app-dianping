@@ -101,7 +101,7 @@ def test_build_live_workflow_requires_flag_and_runs_with_fake_session(tmp_path: 
     result = workflow.run()
     assert result.success is True
 
-def test_build_live_smoke_and_run_live_publish_params(tmp_path: Path):
+def test_build_live_smoke_and_run_live_publish_params(tmp_path: Path, default_photo):
     from automation_app_dianping.live import build_live_smoke_workflow, run_live, LIVE_FLAG
     class S(FakeSession):
         def __init__(self):
