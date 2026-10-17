@@ -1950,7 +1950,20 @@ class DianpingUia2Session:
                 return ActionResult(True, "type_text skipped; dish-edit already has copy")
             result = self._with_translated_candidates(action_name, kwargs)
         elif action_name == "wait_for_element":
-            result = self._with_translated_candidates(action_name, kwargs)
+            # The kit wait resolves selectors lazily and reports success
+            # without touching the tree (live 2026-10-17: the 设置 page faked
+            # an on-home success and the publish-success check could pass
+            # without the page). Poll a real dump for every wait step; only
+            # explicit `by=` callers keep the translated kit path because the
+            # dump parser matches the app's selector vocabulary.
+            selector = kwargs.get("selector")
+            if selector is None:
+                result = ActionResult(False, "wait_for_element: missing selector")
+            elif kwargs.get("by") is not None:
+                result = self._with_translated_candidates(action_name, kwargs)
+            else:
+                timeout = _numeric_parameter(kwargs, "timeout", 5.0, minimum=0.0)
+                result = self._wait_for_marker(selector, timeout)
         else:
             result = self._session.execute_action(action_name, **kwargs)
         if (
@@ -2277,6 +2290,10 @@ class DianpingUia2Session:
         # not on that page and the kit wait/tap report success for absent
         # elements, so restarting the search would no-op and dead-end on the
         # input marker. Skip straight to the row tap when we are here.
+        # This branch deliberately precedes the 待评价 entry below: BACK-ing
+        # out of a valid restored results page to force the pending path would
+        # cost more than it gains, even though 待评价 is the preferred entry
+        # for navigation from home (user directive 2026-10-16).
         if self._results_page_open(source, shop_name, kwargs):
             print("[dianping-uia2] navigate: restored search results page", flush=True)
             return self._advance_from_search_results(shop_name, kwargs)
@@ -2294,7 +2311,7 @@ class DianpingUia2Session:
                 return ActionResult(
                     False,
                     "navigate_to_review_editor: home search bar not reached: %s"
-                    % wait.message,
+                    % recovered.message,
                 )
             print(
                 "[dianping-uia2] navigate: BACK unwind reached home search",
@@ -2490,17 +2507,25 @@ class DianpingUia2Session:
         from discarding an open editor. On-page checks are real dump parses
         — the kit wait fakes success for absent selectors (live 2026-10-17).
 
-        Returns the post-unwind source along with the result so the
-        navigate path keeps working without a second dump.
+        Each press re-reads the hierarchy first: an unreadable dump means the
+        page is unknown, and a blind BACK could exit a dialog or the app
+        itself (live 2026-10-17: UiTestAutomationBridge intermittently
+        returned a null root over wireless debugging).
         """
-        source = self._hierarchy_source()
-        if (
-            review_editor_is_open(source)
-            or dish_edit_is_open(source)
-            or review_publish_chrome_visible(source)
-        ):
-            return ActionResult(False, "refusing BACK with editor chrome visible")
         for _ in range(2):
+            source = self._hierarchy_source()
+            if not source:
+                return ActionResult(
+                    False, "hierarchy unreadable; refusing blind BACK"
+                )
+            if (
+                review_editor_is_open(source)
+                or dish_edit_is_open(source)
+                or review_publish_chrome_visible(source)
+            ):
+                return ActionResult(
+                    False, "refusing BACK with editor chrome visible"
+                )
             self._press_back_quietly()
             if self._marker_present_now(kwargs.get("search_bar")):
                 return ActionResult(True, "home search bar present after BACK")
@@ -2884,11 +2909,6 @@ class DianpingUia2Session:
                 )
             selected += 1
             time.sleep(0.4)
-        if selected != count:
-            return ActionResult(
-                False,
-                "pick_photos: attached %d of %d photo tile(s)" % (selected, count),
-            )
         confirm = self._confirm_picked_photos(kwargs.get("confirm_selector"))
         if not confirm.success:
             return confirm

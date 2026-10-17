@@ -3013,3 +3013,119 @@ def test_uia2_navigate_back_unwinds_warm_start_on_other_tab(monkeypatch):
     # One BACK for the unwind, one for backing out of the pending list.
     assert device.presses == ["back", "back"]
     assert "type_text" in [name for name, _ in kit.calls]
+
+
+def test_uia2_navigate_reports_unwind_failure_without_crashing(monkeypatch):
+    """The unwind-failure branch must return a clean message, not a crash.
+
+    Regression: the failure path referenced a deleted ``wait`` variable and
+    raised UnboundLocalError instead of reporting the recovery failure.
+    """
+    _install_fast_clock(monkeypatch)
+    pages = [_OTHER_TAB_XML]  # never contains the search bar; BACK changes nothing
+
+    class Device:
+        def __init__(self):
+            self.presses = []
+            self.step = 0
+
+        def dump_hierarchy(self):
+            return pages[min(self.step, len(pages) - 1)]
+
+        def press(self, key):
+            self.presses.append(key)
+            self.step = min(self.step + 1, len(pages) - 1)
+
+        def click(self, x, y):
+            pass
+
+    device = Device()
+    kit = FakeKitUia2()
+    kit.driver = device
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+
+    result = session.execute_action(
+        "navigate_to_review_editor",
+        shop_name="细记港九宵夜大牌档(虹桥南丰城店)",
+        write_selector=('uiautomator:new UiSelector().text("写评价")',),
+        search_bar=("id:com.dianping.v1:id/title_search_bar",),
+        search_input=("id:com.dianping.v1:id/search_keyword_edit",),
+        search_confirm=('uiautomator:new UiSelector().text("搜索")',),
+        search_results_marker=('uiautomator:new UiSelector().text("商户")',),
+        shop_result=('uiautomator:new UiSelector().textContains("细记港九")',),
+    )
+
+    assert not result.success
+    assert "home search bar not reached" in result.message
+    # Exactly two BACK attempts, both unwinding a page that never reaches home.
+    assert device.presses == ["back", "back"]
+
+
+def test_uia2_back_to_home_refuses_blind_back_on_unreadable_hierarchy(monkeypatch):
+    """A null/empty dump means the page is unknown: never press BACK blind.
+
+    Live 2026-10-17: UiTestAutomationBridge intermittently returned a null
+    root over wireless debugging; an empty dump previously slipped past the
+    editor-chrome guard and BACK could have discarded an open editor.
+    """
+    _install_fast_clock(monkeypatch)
+
+    class Device:
+        def __init__(self):
+            self.presses = []
+
+        def dump_hierarchy(self):
+            return ""
+
+        def press(self, key):
+            self.presses.append(key)
+
+    device = Device()
+    kit = FakeKitUia2()
+    kit.driver = device
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+
+    result = session._back_to_home_search(
+        {"search_bar": ("id:com.dianping.v1:id/title_search_bar",)}
+    )
+
+    assert not result.success
+    assert "hierarchy unreadable" in result.message
+    assert device.presses == []
+
+
+def test_uia2_wait_for_element_requires_a_real_node(monkeypatch):
+    """wait_for_element must poll a real dump, not the kit lazy lookup.
+
+    The kit wait resolves selectors lazily and reports success for absent
+    selectors (live 2026-10-17: the 设置 page), so the publish-success check
+    could pass without the page. Every wait step now observes the hierarchy.
+    """
+    _install_fast_clock(monkeypatch)
+
+    class Device:
+        def dump_hierarchy(self):
+            return _HOME_WITH_TABS_XML
+
+    device = Device()
+    kit = FakeKitUia2()
+    kit.driver = device
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+
+    absent = session.execute_action(
+        "wait_for_element",
+        selector='uiautomator:new UiSelector().textContains("发布成功")',
+        timeout=0.3,
+    )
+    assert not absent.success
+    assert "timed out waiting for page marker" in absent.message
+
+    present = session.execute_action(
+        "wait_for_element",
+        selector="id:com.dianping.v1:id/title_search_bar",
+        timeout=0.3,
+    )
+    assert present.success
