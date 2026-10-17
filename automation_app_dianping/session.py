@@ -2280,17 +2280,22 @@ class DianpingUia2Session:
         if self._results_page_open(source, shop_name, kwargs):
             print("[dianping-uia2] navigate: restored search results page", flush=True)
             return self._advance_from_search_results(shop_name, kwargs)
-        wait = self._with_translated_candidates(
-            "wait_for_element",
-            {"selector": kwargs.get("search_bar"), "timeout": 10.0},
-        )
-        if not wait.success:
+        # The kit wait resolves lazily and reports success on pages without
+        # the bar (live 2026-10-17: the 设置 page faked a success and the
+        # search tap then burned 60s on absent selectors), so the on-page
+        # check is a real dump parse, same gate as the pending path.
+        on_home = self._marker_present_now(kwargs.get("search_bar"))
+        if not on_home:
             # Warm starts can land on any page (live 2026-10-16: the 我的 tab
             # made this wait fail on all 8 search-bar selectors); BACK walks
             # toward home, where the search bar lives.
             recovered = self._back_to_home_search(kwargs)
             if not recovered.success:
-                return wait
+                return ActionResult(
+                    False,
+                    "navigate_to_review_editor: home search bar not reached: %s"
+                    % wait.message,
+                )
             print(
                 "[dianping-uia2] navigate: BACK unwind reached home search",
                 flush=True,
@@ -2482,7 +2487,11 @@ class DianpingUia2Session:
         The search bar only exists on home, so a warm start elsewhere (live
         2026-10-16: the 我的 tab) hard-failed the search-bar wait. A couple of
         BACK presses reach home; the editor-chrome guard keeps a stray BACK
-        from discarding an open editor.
+        from discarding an open editor. On-page checks are real dump parses
+        — the kit wait fakes success for absent selectors (live 2026-10-17).
+
+        Returns the post-unwind source along with the result so the
+        navigate path keeps working without a second dump.
         """
         source = self._hierarchy_source()
         if (
@@ -2493,12 +2502,8 @@ class DianpingUia2Session:
             return ActionResult(False, "refusing BACK with editor chrome visible")
         for _ in range(2):
             self._press_back_quietly()
-            wait = self._with_translated_candidates(
-                "wait_for_element",
-                {"selector": kwargs.get("search_bar"), "timeout": 6.0},
-            )
-            if wait.success:
-                return wait
+            if self._marker_present_now(kwargs.get("search_bar")):
+                return ActionResult(True, "home search bar present after BACK")
         return ActionResult(False, "home search bar not reached via BACK")
 
     def _results_page_open(

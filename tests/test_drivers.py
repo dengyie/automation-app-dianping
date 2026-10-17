@@ -2047,7 +2047,9 @@ def test_uia2_navigate_searches_from_home(monkeypatch):
     assert result.success, result.message
     assert "via search" in result.message
     names = [name for name, _kwargs in kit.calls]
-    assert "wait_for_element" in names
+    # 2026-10-17: the on-home gate is now a real dump parse (the kit wait
+    # fakes success for absent selectors), so wait_for_element is no longer
+    # part of the navigate flow itself.
     assert "type_text" in names
     assert "tap" in names
     # home → search box → results → shop page → editor
@@ -2980,21 +2982,11 @@ def test_uia2_navigate_back_unwinds_warm_start_on_other_tab(monkeypatch):
     device = Device()
 
     class Kit(FakeKitUia2):
-        # wait_for_element must really consult the page: the search bar only
-        # exists on home, so its wait fails on the inner page and drives the
-        # BACK unwind.
+        # The kit wait fakes success for absent selectors (live 2026-10-17:
+        # the 设置 page did exactly that), so the navigate code now gates the
+        # search tap on a real dump parse — _marker_present_now — and this
+        # fake needs no wait override at all. Taps advance the page.
         def execute_action(self, action_name, **kwargs):
-            if action_name == "wait_for_element":
-                source = device.dump_hierarchy()
-                by = kwargs.get("by")
-                value = str(kwargs.get("selector") or "")
-                if by == "id":
-                    hit = 'resource-id="%s"' % value in source
-                else:
-                    hit = 'text="%s"' % value in source
-                if not hit:
-                    return ActionResult(False, "not on page: %s" % value)
-                return ActionResult(True, "wait_for_element")
             result = super().execute_action(action_name, **kwargs)
             if result.success and action_name in ("tap", "press_key"):
                 device.step = min(device.step + 1, len(pages) - 1)
