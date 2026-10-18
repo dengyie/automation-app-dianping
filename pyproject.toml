@@ -25,9 +25,11 @@ live = [
     "adbutils>=2.9.1",
 ]
 # Optional visual provider. PyPI name `slidex` is an unrelated PPTX library;
-# pin dengyie/slidex by git SHA (Python >=3.10; keep off the 3.8 default CI job).
+# pin dengyie/slidex by git SHA. The environment marker is what keeps it off the
+# 3.8 default CI job, and it is also required for `poetry lock` to resolve at
+# all: without it the 3.10+ requirement contradicts requires-python ">=3.8".
 slidex = [
-    "slidex @ git+https://github.com/dengyie/slidex.git@288f554",
+    "slidex @ git+https://github.com/dengyie/slidex.git@288f554 ; python_version >= \"3.10\"",
 ]
 
 # Local Poetry path dependency is developer convenience only.

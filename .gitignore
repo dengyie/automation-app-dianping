@@ -27,4 +27,7 @@ data/shops.txt
 .playwright-mcp/
 package-lock.json
 *.egg-info/
+# 打包/构建产物（与 kit、damai 两仓一致）
+build/
+dist/
 artifacts/
