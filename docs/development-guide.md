@@ -352,4 +352,6 @@ CI 期望：
 仍依赖外部交付、不阻塞本仓完成判定：
 
 - 真机 selector 校准（opt-in live）
-- automation-kit 正式包源 capability 矩阵发布
+- ~~automation-kit 正式包源 capability 矩阵发布~~（2026-10-19 定级：kit 不自用发布，CI 既定
+  走 sibling 检出 + `-e` 安装；实质部分 `automation_core.capabilities` 已随 kit `0.5.0`
+  交付，不再列为外部依赖，详见 `platform-requests.md` REQ-003）

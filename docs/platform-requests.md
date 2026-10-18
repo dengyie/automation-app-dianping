@@ -53,6 +53,13 @@
 
 ## REQ-003 正式包源 capability 矩阵
 
+> **2026-10-19 定级：不再作为前置（实质部分已满足）。** 核实消费侧取用方式后确认——本仓与
+> 其余消费仓本地及 CI 一律 sibling 检出 + `pip install -e ../automation-kit`，pyproject 里
+> 的 `automation-kit>=0.5.0,<0.6.0` 从未被任何包源解析，故「从正式包源安装」不是本仓的
+> 工作方式，而是可选的对外分发形态。请求中真正实质的一条（`automation_core.capabilities`
+> 稳定导出）已随 kit `0.5.0` 交付并在 CI 契约测试中验证。仅当将来决定把 kit 上架包源时，
+> 本条才需要重新打开。
+
 ## 背景
 - 业务场景：CI/发布不依赖 sibling path
 - 当前阻塞：主线 automation-kit 发布包可能尚未含 capability 模块

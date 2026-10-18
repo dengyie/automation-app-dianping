@@ -5,7 +5,11 @@ description = "Dianping application workflows built on automation-kit"
 authors = [{ name = "mango" }]
 readme = "README.md"
 requires-python = ">=3.8,<4.0"
-# Release / CI install surface: published version range only (no sibling path).
+# 兼容范围声明，不是「从包源可解析」的发布依赖：automation-kit 未上任何包源
+# （PyPI 上无 automation-kit），本仓本地与 CI 的实际取用方式是 monorepo sibling 检出 +
+# `pip install -e ../automation-kit`（见 [tool.poetry.dependencies] 的 path 依赖与 ci.yml），
+# 这一行只记录本应用适配的 kit 版本区间，因此从不被包源解析。若将来 kit 上架，
+# 本行即为可直接解析的依赖，无需改动。
 dependencies = [
     "automation-kit>=0.5.0,<0.6.0",
     # pick_photos stages review images through PIL (EXIF rewrite, alpha flatten).
