@@ -486,20 +486,27 @@ def test_publish_rates_overall_before_dimension_rows():
 # --- no-submit publish rehearsal (approved live gate, 2026-11) ---------------
 
 
-def _publish_options(**extra):
+def _publish_options(tmp_path, **extra):
+    # An explicit photo list (a real file under tmp_path) keeps pick_photos in
+    # the step list on every environment — the repo-local default photo
+    # (artifacts/gni2_pulled.jpg) does not exist on CI, where
+    # default_review_photos() returns [] and the photos block is skipped.
+    photo = tmp_path / "rehearsal.jpg"
+    photo.write_bytes(b"\xff\xd8fake")
     parameters = {
         "mode": "publish",
         "shop_name": "味香斋",
         "content": "红烧肉肥而不腻，响油鳝丝很香，环境有烟火气，服务也利落，值得再来一次。" * 4,
         "ratings": {"taste": 5, "environment": 5, "service": 5},
+        "photos": [str(photo)],
     }
     parameters.update(extra)
     return WorkflowOptions(parameters=parameters)
 
 
-def test_publish_steps_no_submit_stops_before_submit_tap():
+def test_publish_steps_no_submit_stops_before_submit_tap(tmp_path):
     selectors = default_selectors()
-    steps = build_publish_steps(_publish_options(no_submit=True), selectors)
+    steps = build_publish_steps(_publish_options(tmp_path, no_submit=True), selectors)
 
     # No submit tap (the only selector referencing 发布) and no success wait.
     submit_taps = [
@@ -519,10 +526,10 @@ def test_publish_steps_no_submit_stops_before_submit_tap():
     assert any(step.name == "rate" for step in steps)
 
 
-def test_publish_steps_default_keeps_submit_block():
+def test_publish_steps_default_keeps_submit_block(tmp_path):
     """Regression: without the flag the externally-visible tail is intact."""
     selectors = default_selectors()
-    steps = build_publish_steps(_publish_options(), selectors)
+    steps = build_publish_steps(_publish_options(tmp_path), selectors)
 
     # Artifact steps carry the artifact type as their name ("screenshot").
     tail = [(step.kind, step.name) for step in steps[-4:]]

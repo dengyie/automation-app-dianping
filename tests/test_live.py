@@ -128,6 +128,11 @@ def test_run_live_no_submit_stops_before_submit(tmp_path: Path):
     """no_submit runs dialogs/editor/rating/photos but never taps 发布."""
     from automation_app_dianping.live import run_live, LIVE_FLAG
 
+    # Explicit photo (real file under tmp_path): the repo-local default photo
+    # does not exist on CI, where the photos block would be skipped entirely.
+    photo = tmp_path / "rehearsal.jpg"
+    photo.write_bytes(b"\xff\xd8fake")
+
     class S(FakeSession):
         def __init__(self):
             super().__init__()
@@ -149,6 +154,7 @@ def test_run_live_no_submit_stops_before_submit(tmp_path: Path):
         mode="publish",
         shop_name="店",
         content=content,
+        photos=[str(photo)],
         session_factory=lambda: s,
         env={LIVE_FLAG: "1"},
         no_submit=True,
