@@ -33,7 +33,7 @@ live = [
 # 3.8 default CI job, and it is also required for `poetry lock` to resolve at
 # all: without it the 3.10+ requirement contradicts requires-python ">=3.8".
 slidex = [
-    "slidex @ git+https://github.com/dengyie/slidex.git@288f554 ; python_version >= \"3.10\"",
+    "slidex @ git+https://github.com/dengyie/slidex.git@aa37a8f ; python_version >= \"3.10\"",
 ]
 
 # Local Poetry path dependency is developer convenience only.
