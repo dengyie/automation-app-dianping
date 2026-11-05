@@ -99,12 +99,50 @@ def test_translate_single_method_uiselectors():
         assert translate_uiautomator_selector(raw) == expected
 
 
+def test_translate_multi_method_chain_to_composite_descriptor():
+    """publish uia2 parity 2026-11: combined chains become kit descriptors."""
+    raw = (
+        "uiautomator:new UiSelector()."
+        'className("android.widget.FrameLayout").descriptionContains("店铺")'
+    )
+    assert translate_uiautomator_selector(raw) == (
+        "uiautomator",
+        {"className": "android.widget.FrameLayout", "descriptionContains": "店铺"},
+    )
+
+
+def test_translate_resource_id_with_instance_to_composite_descriptor():
+    raw = (
+        "uiautomator:new UiSelector().resourceId("
+        '"com.dianping.v1:id/ugc_album_item_select_layout")'
+        ".instance(2)"
+    )
+    assert translate_uiautomator_selector(raw) == (
+        "uiautomator",
+        {
+            "resourceId": "com.dianping.v1:id/ugc_album_item_select_layout",
+            "instance": 2,
+        },
+    )
+
+
+def test_translate_ignores_instance_inside_quoted_argument():
+    raw = 'uiautomator:new UiSelector().text("a.instance(1)")'
+    assert translate_uiautomator_selector(raw) == ("text", "a.instance(1)")
+
+
+def test_translate_unescapes_quoted_arguments():
+    raw = 'uiautomator:new UiSelector().textContains("烤鸭 \\"片皮\\"")'
+    assert translate_uiautomator_selector(raw) == ("text-contains", '烤鸭 "片皮"')
+
+
 def test_translate_rejects_unsupported_uiautomator_constructs():
     unsupported = [
-        'uiautomator:new UiSelector().text("x").instance(0)',
+        # instance without any attribute constraint selects by bare position.
+        "uiautomator:new UiSelector().instance(0)",
         'uiautomator:new UiSelector().text("x").fromParent(new UiSelector())',
         'uiautomator:new UiSelector().text("x").childSelector(new UiSelector())',
-        'uiautomator:new UiSelector().className("a").text("b")',
+        'uiautomator:new UiSelector().textStartsWith("x")',
         "uiautomator:not-a-selector",
     ]
     for raw in unsupported:
@@ -369,13 +407,13 @@ def test_uia2_dismiss_dialogs_skips_untranslatable_candidates():
     result = session.execute_action(
         "dismiss_dialogs",
         selector=(
-            'uiautomator:new UiSelector().text("x").instance(0)',
+            'uiautomator:new UiSelector().text("x").fromParent(new UiSelector())',
             'uiautomator:new UiSelector().text("关闭")',
         ),
         max_attempts=1,
     )
 
-    # The instance() candidate is skipped without failing the step.
+    # The fromParent candidate is skipped without failing the step.
     assert result.success is True
     assert result.data == {"dismissed": 0}
 
@@ -1179,6 +1217,11 @@ class _PickerKit(FakeKitUia2):
         super().__init__()
         self.device = device
 
+    def find_element(self, by, selector):
+        """Mirror the kit ElementLookupSession contract for tile descriptors."""
+        self.calls.append(("find_element", {"by": by, "selector": selector}))
+        return self.device(**selector)
+
     def execute_action(self, action_name, **kwargs):
         self.calls.append((action_name, kwargs))
         if action_name == "tap":
@@ -1918,6 +1961,32 @@ def test_preferred_tap_rect_shrinks_full_width_draft_card():
     assert button == {"x": 829, "y": 1522, "width": 211, "height": 70}
     write = preferred_tap_rect(_SHOP_WRITE_REVIEW_XML, "text", "写评价")
     assert write == {"x": 191, "y": 2179, "width": 96, "height": 113}
+
+
+def test_preferred_tap_rect_matches_composite_descriptor():
+    """Composite descriptors match dump nodes by attribute constraints."""
+    xml = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy>
+  <node class="android.widget.FrameLayout" clickable="true" bounds="[0,0][1080,2000]">
+    <node text="门店" content-desc="店铺" class="android.widget.TextView" clickable="false" bounds="[10,20][300,80]" />
+  </node>
+</hierarchy>
+"""
+    descriptor = {
+        "className": "android.widget.TextView",
+        "descriptionContains": "店铺",
+    }
+    rect = preferred_tap_rect(xml, "uiautomator", descriptor)
+    assert rect == {"x": 10, "y": 20, "width": 290, "height": 60}
+    # A missing attribute constraint does not match.
+    assert (
+        preferred_tap_rect(
+            xml, "uiautomator", {"className": "android.widget.Button"}
+        )
+        is None
+    )
+    # Non-dict values with the composite by never match.
+    assert preferred_tap_rect(xml, "uiautomator", "店铺") is None
 
 
 def test_shop_page_has_review_entry_requires_shop_and_cta():

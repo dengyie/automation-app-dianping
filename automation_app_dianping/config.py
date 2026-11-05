@@ -126,8 +126,6 @@ class DianpingSelectors:
         'uiautomator:new UiSelector().text("取消")',
         "~关闭",
     )
-    rating_stars: Dict[str, Dict[int, str]] = field(default_factory=dict)
-
     # 2026-09 editor geometry (OnePlus 7T, 1080px width). The overall row
     # stacks each star under its emoji+label (y anchors on the label bottom,
     # x on the measured star strip); dimension rows place the label left of
@@ -175,28 +173,12 @@ class DianpingSelectors:
         label = labels.get(dimension, dimension)
         return ('uiautomator:new UiSelector().text("%s")' % label,)
 
-    def rating_star(self, dimension: str, value: int) -> Optional[str]:
-        return (self.rating_stars.get(dimension) or {}).get(value)
-
     def shop_name_selector(self, shop_name: str) -> str:
         cleaned = (shop_name or "").strip()
         if not cleaned:
             raise ValueError("shop_name is required")
         safe = cleaned.replace("\\", "\\\\").replace('"', '\\"')
         return 'uiautomator:new UiSelector().textContains("%s")' % safe
-
-    def rating_selector(self, dimension: str, value: int) -> SelectorValue:
-        labels = {"taste": "口味", "environment": "环境", "service": "服务"}
-        label = labels.get(dimension, dimension)
-        # Prefer stars associated with the dimension label text; fall back to configured map.
-        primary = [
-            'uiautomator:new UiSelector().text("%s").fromParent(new UiSelector().className("android.widget.ImageView").instance(%s))' % (label, int(value) - 1),
-            'uiautomator:new UiSelector().descriptionContains("%s").childSelector(new UiSelector().className("android.widget.ImageView").instance(%s))' % (label, int(value) - 1),
-        ]
-        fallback = self.rating_star(dimension, value)
-        if fallback:
-            primary.append(fallback)
-        return tuple(primary)
 
     def photo_thumbnail_at(self, index: int) -> str:
         return (
@@ -261,20 +243,7 @@ class DianpingAppConfig:
 
 
 def default_selectors() -> DianpingSelectors:
-    def stars(start: int):
-        return {
-            i: 'uiautomator:new UiSelector().className("android.widget.ImageView").instance(%s)'
-            % (start + i - 1)
-            for i in range(1, 6)
-        }
-
-    return DianpingSelectors(
-        rating_stars={
-            "taste": stars(0),
-            "environment": stars(5),
-            "service": stars(10),
-        }
-    )
+    return DianpingSelectors()
 
 
 def count_chinese_chars(text: str) -> int:
