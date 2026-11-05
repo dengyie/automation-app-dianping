@@ -1107,10 +1107,24 @@ def build_session_factory(
 
 # --- uiautomator2 driver (no Appium server) --------------------------------
 
-_UIA2_UNSUPPORTED_TOKENS = ("instance(", "childSelector", "fromParent")
+_UIA2_UNSUPPORTED_TOKENS = ("childSelector", "fromParent")
 
-# Single-method UiSelector constructs that map onto kit uia2 ``by`` keys.
+# UiSelector string methods → uiautomator2 selector kwargs (composite
+# descriptor keys). Single-method chains keep mapping onto the kit single-key
+# ``by`` vocabulary (``_UIA2_KIT_BY``) so existing locator lists behave
+# unchanged; chains combining methods or carrying ``.instance(N)`` return a
+# composite ``("uiautomator", descriptor)`` pair that the kit adapter
+# dispatches as one multi-kwarg device lookup (publish uia2 parity 2026-11).
 _UIA2_METHOD_MAP = {
+    "text": "text",
+    "textContains": "textContains",
+    "description": "description",
+    "descriptionContains": "descriptionContains",
+    "resourceId": "resourceId",
+    "className": "className",
+}
+
+_UIA2_KIT_BY = {
     "text": "text",
     "textContains": "text-contains",
     "description": "description",
@@ -1119,7 +1133,8 @@ _UIA2_METHOD_MAP = {
     "className": "class",
 }
 
-_UIA2_METHOD_RE = re.compile(r'\.(\w+)\(\s*"([^"]*)"\s*\)')
+_UIA2_METHOD_RE = re.compile(r'\.(\w+)\(\s*"((?:[^"\\]|\\.)*)"\s*\)')
+_UIA2_INSTANCE_RE = re.compile(r"\.instance\(\s*(\d+)\s*\)")
 
 _PHOTO_IMAGE_RESOURCE_ID = "com.dianping.v1:id/ugc_album_item_photo_imageView"
 _PHOTO_SELECT_RESOURCE_ID = "com.dianping.v1:id/ugc_album_item_select_layout"
@@ -1260,7 +1275,40 @@ def editor_attached_photo_rects(source: str) -> List[Dict[str, int]]:
     return rects
 
 
-def _node_matches_selector(node: ET.Element, by: str, value: str) -> bool:
+def _node_matches_descriptor(node: ET.Element, value: Any) -> bool:
+    """Match a composite descriptor's attribute constraints against a node.
+
+    ``instance`` is ignored here: positional indexes are resolved by the live
+    uiautomator2 selector, while dump matching intentionally accepts any
+    instance of the attribute set (callers order/pick tiles themselves).
+    """
+    if not isinstance(value, dict):
+        return False
+    for key, expected in value.items():
+        if key == "instance":
+            continue
+        contains = key.endswith("Contains")
+        if key in ("text", "textContains"):
+            actual = node.get("text") or ""
+        elif key in ("description", "descriptionContains"):
+            actual = node.get("content-desc") or ""
+        elif key == "resourceId":
+            actual = node.get("resource-id") or ""
+        elif key == "className":
+            actual = node.get("class") or ""
+        else:
+            return False
+        if contains:
+            if expected not in actual:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+def _node_matches_selector(node: ET.Element, by: str, value: Any) -> bool:
+    if by == "uiautomator":
+        return _node_matches_descriptor(node, value)
     text = node.get("text") or ""
     desc = node.get("content-desc") or ""
     rid = node.get("resource-id") or ""
@@ -1281,7 +1329,7 @@ def _node_matches_selector(node: ET.Element, by: str, value: str) -> bool:
 
 
 def clickable_ancestor_rect(
-    source: str, by: str, value: str
+    source: str, by: str, value: Any
 ) -> Optional[Dict[str, int]]:
     """Nearest clickable ancestor of a Picasso chrome label.
 
@@ -1315,7 +1363,7 @@ def clickable_ancestor_rect(
 
 
 def preferred_tap_rect(
-    source: str, by: str, value: str
+    source: str, by: str, value: Any
 ) -> Optional[Dict[str, int]]:
     """Tap target for Picasso labels, shrinking oversized card ancestors.
 
@@ -1814,15 +1862,23 @@ def dish_edit_trash_rect(source: str) -> Optional[Dict[str, int]]:
     return None
 
 
-def translate_uiautomator_selector(selector: Any) -> Optional[Tuple[str, str]]:
+def _unescape_uia2_argument(argument: str) -> str:
+    """Undo the ``shop_name_selector``-style escaping inside a UiSelector arg."""
+    return argument.replace('\\"', '"').replace("\\\\", "\\")
+
+
+def translate_uiautomator_selector(selector: Any) -> Optional[Tuple[str, Any]]:
     """Translate a dianping locator string into a kit uia2 ``(by, value)`` pair.
 
     Supported forms: ``id:<resource-id>``, ``~description``, ``xpath:...``,
-    bare ``//xpath``, plain text, and single-method UiSelector chains such as
-    ``uiautomator:new UiSelector().text("确定")``. Returns ``None`` for
-    constructs uiautomator2 cannot express (instance/childSelector/fromParent
-    or multi-method chains) so callers can skip the candidate; a missing
-    candidate is never an error because locator lists carry fallbacks.
+    bare ``//xpath``, plain text, single-method UiSelector chains (mapped onto
+    the kit single-key ``by`` vocabulary), and multi-method or ``.instance(N)``
+    chains (returned as a composite ``("uiautomator", descriptor)`` pair the
+    kit adapter dispatches as one multi-kwarg device lookup). Returns ``None``
+    for constructs uiautomator2 cannot express (childSelector/fromParent,
+    unknown methods, ``instance`` without a preceding constraint) so callers
+    can skip the candidate; a missing candidate is never an error because
+    locator lists carry fallbacks.
     """
     if not isinstance(selector, str):
         return None
@@ -1843,14 +1899,29 @@ def translate_uiautomator_selector(selector: Any) -> Optional[Tuple[str, str]]:
             return None
         if any(token in body for token in _UIA2_UNSUPPORTED_TOKENS):
             return None
-        matches = _UIA2_METHOD_RE.findall(body)
-        if len(matches) != 1:
-            return None
-        method, argument = matches[0]
-        mapped = _UIA2_METHOD_MAP.get(method)
-        if mapped is None:
-            return None
-        return (mapped, argument)
+        methods = _UIA2_METHOD_RE.findall(body)
+        constraints: List[Tuple[str, str]] = []
+        for method, argument in methods:
+            key = _UIA2_METHOD_MAP.get(method)
+            if key is None:
+                return None
+            constraints.append((key, _unescape_uia2_argument(argument)))
+        # Scan for ``.instance(N)`` outside the matched method spans so an
+        # argument like text("a.instance(1)") is not misread as a positional
+        # index constraint.
+        remainder = _UIA2_METHOD_RE.sub("", body)
+        instances = _UIA2_INSTANCE_RE.findall(remainder)
+        if len(constraints) + len(instances) > 1:
+            if len(instances) > 1:
+                return None
+            descriptor: Dict[str, Any] = dict(constraints)
+            if instances:
+                descriptor["instance"] = int(instances[0])
+            return ("uiautomator", descriptor)
+        if len(constraints) == 1:
+            method = methods[0][0]
+            return (_UIA2_KIT_BY[method], constraints[0][1])
+        return None
     return ("text", text)
 
 
@@ -3479,49 +3550,61 @@ class DianpingUia2Session:
         then photos. Tapping ``photo_imageView`` opens a preview sheet; the
         real select hit target is ``ugc_album_item_select_layout``. Prefer
         that resourceId, then photo_imageView, then className. A class-only
-        ImageView.instance(0) hits a video. The kit translator rejects
-        instance() chains, so drive u2 directly. Success requires the badge
-        to show a selection number — otherwise 下一步 closes with 0 photos.
+        ImageView.instance(0) hits a video. Selection goes through the kit
+        composite ``uiautomator`` descriptor (publish uia2 parity 2026-11):
+        each candidate becomes a ``resourceId/className + instance`` dict
+        resolved via the kit session's ``find_element`` contract, so the
+        exists check and click no longer bypass the kit session. Success
+        requires the badge to show a selection number — otherwise 下一步
+        closes with 0 photos.
         """
-        resource_ids: List[str] = []
-        class_name = None
+        descriptors: List[Dict[str, Any]] = []
         for candidate in as_selector_list(thumb_selector) if thumb_selector else []:
             if not isinstance(candidate, str):
                 continue
-            if 'resourceId("' in candidate:
-                rid = candidate.split('resourceId("', 1)[1].split('")', 1)[0]
-                if rid and rid not in resource_ids:
-                    resource_ids.append(rid)
-            elif class_name is None and 'className("' in candidate:
-                class_name = candidate.split('className("', 1)[1].split('")', 1)[0]
-        ordered: List[str] = []
+            translated = translate_uiautomator_selector(candidate)
+            if translated is None:
+                continue
+            by, value = translated
+            if by == "uiautomator" and isinstance(value, dict):
+                base = {k: v for k, v in value.items() if k != "instance"}
+            elif by == "id":
+                base = {"resourceId": value}
+            elif by == "class":
+                base = {"className": value}
+            else:
+                # text/description candidates do not identify gallery tiles.
+                continue
+            base["instance"] = index
+            descriptors.append(base)
+        ordered: List[Dict[str, Any]] = []
         for rid in (_PHOTO_SELECT_RESOURCE_ID, _PHOTO_IMAGE_RESOURCE_ID):
-            if rid in resource_ids:
-                ordered.append(rid)
-        for rid in resource_ids:
-            if rid not in ordered:
-                ordered.append(rid)
-        lookups = [{"resourceId": rid, "instance": index} for rid in ordered]
-        if not lookups and class_name:
-            lookups = [{"className": class_name, "instance": index}]
-        if not lookups:
-            lookups = [{"resourceId": _PHOTO_SELECT_RESOURCE_ID, "instance": index}]
+            preferred = {"resourceId": rid, "instance": index}
+            if any(d.get("resourceId") == rid for d in descriptors):
+                ordered.append(preferred)
+        for descriptor in descriptors:
+            if descriptor not in ordered:
+                ordered.append(descriptor)
+        if not ordered:
+            ordered = [{"resourceId": _PHOTO_SELECT_RESOURCE_ID, "instance": index}]
         last_miss = "photo tile instance %d absent" % index
         attempts = 0
-        for lookup in lookups:
+        for lookup in ordered:
             for _ in range(2):
                 # The grid can still be settling when a tap lands (live
                 # 2026-10-16: the tile was visible in the dump yet the click
                 # never stuck); retry the same selector before falling back to
                 # the next candidate instead of giving up after one miss.
                 try:
-                    widget = self._session.driver(**lookup)
-                    if not bool(getattr(widget, "exists", False)):
-                        last_miss = "photo tile instance %d absent" % index
-                        break
-                    widget.click()
+                    element = self._session.find_element("uiautomator", lookup)
                 except Exception as exc:
-                    return ActionResult(False, "photo tile tap failed: %s" % exc)
+                    return ActionResult(False, "photo tile lookup failed: %s" % exc)
+                if not bool(getattr(element, "exists", False)):
+                    last_miss = "photo tile instance %d absent" % index
+                    break
+                click_result = element.click()
+                if isinstance(click_result, ActionResult) and not click_result.success:
+                    return click_result
                 attempts += 1
                 deadline = time.time() + 3.0
                 while time.time() < deadline:

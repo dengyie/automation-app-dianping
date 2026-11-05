@@ -22,11 +22,11 @@ def test_dianping_app_config_rejects_blank_city():
         DianpingAppConfig(city="   ")
 
 
-def test_default_selectors_expose_rating_star_lookup():
+def test_default_selectors_drop_legacy_rating_star_map():
+    """Legacy rating_stars/rating_selector removed with uia2 parity (2026-11)."""
     selectors = default_selectors()
-    star = selectors.rating_star("taste", 4)
-    assert isinstance(star, str) and "UiSelector" in star
-    assert selectors.rating_star("taste", 9) is None
+    assert not hasattr(selectors, "rating_stars")
+    assert not hasattr(selectors, "rating_selector")
 
 
 def test_validate_review_content_enforces_business_rules():
