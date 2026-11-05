@@ -481,3 +481,54 @@ def test_publish_rates_overall_before_dimension_rows():
     dimension_steps = [steps[i] for i in rate_indexes[1:]]
     assert [s.parameters["anchor"] for s in dimension_steps] == ["dimension_row"] * 3
     assert all("口味" in str(s.parameters["selector"]) for s in dimension_steps[:1])
+
+
+# --- no-submit publish rehearsal (approved live gate, 2026-11) ---------------
+
+
+def _publish_options(**extra):
+    parameters = {
+        "mode": "publish",
+        "shop_name": "味香斋",
+        "content": "红烧肉肥而不腻，响油鳝丝很香，环境有烟火气，服务也利落，值得再来一次。" * 4,
+        "ratings": {"taste": 5, "environment": 5, "service": 5},
+    }
+    parameters.update(extra)
+    return WorkflowOptions(parameters=parameters)
+
+
+def test_publish_steps_no_submit_stops_before_submit_tap():
+    selectors = default_selectors()
+    steps = build_publish_steps(_publish_options(no_submit=True), selectors)
+
+    # No submit tap (the only selector referencing 发布) and no success wait.
+    submit_taps = [
+        step
+        for step in steps
+        if step.kind == "action" and step.name == "tap"
+        and "发布" in str(step.parameters.get("selector"))
+    ]
+    assert submit_taps == []
+    assert all(step.name != "wait_for_element" for step in steps)
+    # The rehearsal artifact is the final step.
+    last = steps[-1]
+    assert last.kind == "artifact"
+    assert last.parameters["name"] == "publish-no-submit.png"
+    # Everything up to the photos/confirm block is retained.
+    assert any(step.name == "pick_photos" for step in steps)
+    assert any(step.name == "rate" for step in steps)
+
+
+def test_publish_steps_default_keeps_submit_block():
+    """Regression: without the flag the externally-visible tail is intact."""
+    selectors = default_selectors()
+    steps = build_publish_steps(_publish_options(), selectors)
+
+    # Artifact steps carry the artifact type as their name ("screenshot").
+    tail = [(step.kind, step.name) for step in steps[-4:]]
+    assert tail == [
+        ("action", "tap"),
+        ("artifact", "screenshot"),
+        ("action", "wait_for_element"),
+        ("artifact", "screenshot"),
+    ]

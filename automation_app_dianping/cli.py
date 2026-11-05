@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--enable-slidex", action="store_true")
     live.add_argument("--mark-published", action="store_true")
     live.add_argument(
+        "--no-submit",
+        action="store_true",
+        help="publish rehearsal: run the full flow and stop right before the "
+        "submit tap (final artifact publish-no-submit.png); nothing is posted",
+    )
+    live.add_argument(
         "--photos",
         nargs="+",
         default=None,
@@ -134,6 +140,7 @@ def cmd_live(args) -> int:
             device=device,
             env=_apply_live_env(args, os.environ),
             mark_published=args.mark_published,
+            no_submit=args.no_submit,
         )
     )
 

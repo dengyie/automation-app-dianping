@@ -205,6 +205,7 @@ def build_live_workflow(
     photos: Optional[list] = None,
     device: Optional[DianpingDeviceConfig] = None,
     env: Optional[dict] = None,
+    no_submit: bool = False,
 ):
     require_live_enabled(env)
     require_uia2_publish(env, session_factory=session_factory)
@@ -251,6 +252,10 @@ def build_live_workflow(
             ),
         }
 
+    # Authorized rehearsal (no_submit): the flag flows to the publish flow so
+    # it stops right before the externally-visible submit tap.
+    parameters["no_submit"] = bool(no_submit)
+
     composition = build_composition(enable_slidex=enable_slidex)
     factory = resolve_session_factory(
         session_factory=session_factory,
@@ -282,6 +287,7 @@ def run_live(
     device: Optional[DianpingDeviceConfig] = None,
     env: Optional[dict] = None,
     mark_published: bool = False,
+    no_submit: bool = False,
 ):
     mode_normalized = (mode or "smoke").strip().lower()
     if mode_normalized == "smoke":
@@ -308,6 +314,7 @@ def run_live(
         photos=photos,
         device=device,
         env=env,
+        no_submit=no_submit,
     ).run()
     if mark_published and result.success and draft_id:
         from automation_app_dianping.services import mark_draft_published

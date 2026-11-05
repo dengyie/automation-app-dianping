@@ -314,6 +314,14 @@ def build_publish_steps(options, selectors):
             )
         )
 
+    if bool(parameters.get("no_submit")):
+        # Authorized rehearsal (approved live gate): run the full publish
+        # flow — dialogs, navigation, editor, typing, rating, photos — and
+        # stop right before the externally-visible submit tap. The final
+        # artifact proves how far the flow got without posting anything.
+        steps.append(WorkflowStep.artifact("screenshot", "publish-no-submit.png"))
+        return steps
+
     steps.extend(
         [
             WorkflowStep.action("tap", selector=selectors.submit),

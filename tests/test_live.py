@@ -124,6 +124,52 @@ def test_build_live_smoke_and_run_live_publish_params(tmp_path: Path, default_ph
     assert pick["photos"] == [str(DEFAULT_REVIEW_PHOTO)]
 
 
+def test_run_live_no_submit_stops_before_submit(tmp_path: Path):
+    """no_submit runs dialogs/editor/rating/photos but never taps 发布."""
+    from automation_app_dianping.live import run_live, LIVE_FLAG
+
+    class S(FakeSession):
+        def __init__(self):
+            super().__init__()
+            self.actions = []
+            self.artifacts = []
+
+        def execute_action(self, action_name, **kwargs):
+            self.actions.append((action_name, kwargs))
+            return ActionResult(success=True, message=action_name, data=kwargs)
+
+        def capture_artifact(self, artifact_type, name):
+            # Artifact steps dispatch via capture_artifact, not execute_action.
+            self.artifacts.append((artifact_type, name))
+            return ArtifactHandle(artifact_type=artifact_type, path=Path(name))
+
+    s = S()
+    content = "红烧肉肥而不腻，响油鳝丝很香，环境有烟火气，服务利落，值得再来。" * 4
+    result = run_live(
+        mode="publish",
+        shop_name="店",
+        content=content,
+        session_factory=lambda: s,
+        env={LIVE_FLAG: "1"},
+        no_submit=True,
+    )
+    assert result.success
+    # The flow got all the way through photo picking…
+    assert any(name == "pick_photos" for name, _ in s.actions)
+    assert any(name == "rate" for name, _ in s.actions)
+    # …but never tapped the externally-visible submit button, and captured
+    # the rehearsal proof artifact as the final action.
+    submit_taps = [
+        kwargs
+        for name, kwargs in s.actions
+        if name == "tap" and "发布" in str(kwargs.get("selector"))
+    ]
+    assert submit_taps == []
+    # Artifact steps dispatch via capture_artifact; the rehearsal proof is
+    # the final artifact, and the run stopped before any post-submit capture.
+    assert s.artifacts[-1] == ("screenshot", "publish-no-submit.png")
+
+
 def _slider_solver_with_result(result):
     """Build the live slider bridge around a fake capability executor."""
 
