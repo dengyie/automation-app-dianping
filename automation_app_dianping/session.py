@@ -1135,6 +1135,7 @@ _UIA2_KIT_BY = {
 
 _UIA2_METHOD_RE = re.compile(r'\.(\w+)\(\s*"((?:[^"\\]|\\.)*)"\s*\)')
 _UIA2_INSTANCE_RE = re.compile(r"\.instance\(\s*(\d+)\s*\)")
+_UIA2_RESIDUAL_METHOD_RE = re.compile(r"\.\w+\s*\(")
 
 _PHOTO_IMAGE_RESOURCE_ID = "com.dianping.v1:id/ugc_album_item_photo_imageView"
 _PHOTO_SELECT_RESOURCE_ID = "com.dianping.v1:id/ugc_album_item_select_layout"
@@ -1911,6 +1912,13 @@ def translate_uiautomator_selector(selector: Any) -> Optional[Tuple[str, Any]]:
         # index constraint.
         remainder = _UIA2_METHOD_RE.sub("", body)
         instances = _UIA2_INSTANCE_RE.findall(remainder)
+        # Anything left over besides the constructor prefix and the consumed
+        # instance spans is an unknown modifier (`.enabled(true)`,
+        # `.index(2)`, …): rejecting keeps the docstring's "unknown methods
+        # → None" promise instead of silently dropping the constraint.
+        residual = _UIA2_INSTANCE_RE.sub("", remainder).replace("new UiSelector()", "")
+        if _UIA2_RESIDUAL_METHOD_RE.search(residual):
+            return None
         if len(constraints) + len(instances) > 1:
             if len(instances) > 1:
                 return None
@@ -3597,6 +3605,12 @@ class DianpingUia2Session:
                 # the next candidate instead of giving up after one miss.
                 try:
                     element = self._session.find_element("uiautomator", lookup)
+                except KeyError:
+                    # The kit session signals "lookup did not resolve" with
+                    # KeyError; treat it like an absent tile and fall through
+                    # to the next candidate instead of abandoning all of them.
+                    last_miss = "photo tile instance %d lookup missed" % index
+                    break
                 except Exception as exc:
                     return ActionResult(False, "photo tile lookup failed: %s" % exc)
                 if not bool(getattr(element, "exists", False)):
@@ -3700,18 +3714,23 @@ class DianpingUia2Session:
             True, "pick_photos: confirmed via %s" % " -> ".join(tapped)
         )
 
-    def _uia2_widget_exists(self, by: str, value: str) -> bool:
+    def _uia2_widget_exists(self, by: str, value: Any) -> bool:
         driver = getattr(self._session, "driver", None)
         if not callable(driver):
             return True
-        kwargs = {
-            "text": {"text": value},
-            "text-contains": {"textContains": value},
-            "description": {"description": value},
-            "description-contains": {"descriptionContains": value},
-            "id": {"resourceId": value},
-            "class": {"className": value},
-        }.get(by)
+        if by == "uiautomator" and isinstance(value, dict):
+            # Composite descriptor (publish uia2 parity 2026-11): u2 accepts
+            # the whitelisted multi-kwarg dict directly, instance included.
+            kwargs = value
+        else:
+            kwargs = {
+                "text": {"text": value},
+                "text-contains": {"textContains": value},
+                "description": {"description": value},
+                "description-contains": {"descriptionContains": value},
+                "id": {"resourceId": value},
+                "class": {"className": value},
+            }.get(by)
         if kwargs is None:
             return True
         try:
