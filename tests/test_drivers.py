@@ -3198,3 +3198,114 @@ def test_uia2_wait_for_element_requires_a_real_node(monkeypatch):
         timeout=0.3,
     )
     assert present.success
+
+
+# --- backlog rootfixes 2026-11 -----------------------------------------------
+
+
+def test_translate_rejects_unquoted_unknown_methods():
+    """Unknown zero-arg/boolean modifiers must not be silently dropped."""
+    rejected = [
+        'uiautomator:new UiSelector().text("发布").enabled(true)',
+        'uiautomator:new UiSelector().text("发布").clickable (true)',
+        'uiautomator:new UiSelector().resourceId("x").index(2)',
+    ]
+    for raw in rejected:
+        assert translate_uiautomator_selector(raw) is None, raw
+
+
+def test_uia2_widget_exists_supports_composite_descriptor(monkeypatch):
+    session, kit = _make_uia2_session(monkeypatch)
+
+    class DescriptorDevice:
+        def __init__(self):
+            self.lookups = []
+
+        def __call__(self, **kwargs):
+            self.lookups.append(dict(kwargs))
+
+            class Widget:
+                exists = False
+
+            return Widget()
+
+    device = DescriptorDevice()
+    session._session.driver = device
+
+    exists = session._uia2_widget_exists(
+        "uiautomator", {"resourceId": "com.dianping.v1:id/x", "instance": 1}
+    )
+
+    assert exists is False
+    assert device.lookups == [
+        {"resourceId": "com.dianping.v1:id/x", "instance": 1}
+    ]
+
+
+def test_pick_photo_tile_falls_through_on_keyerror(monkeypatch, tmp_path):
+    """kit find_element KeyError = lookup missed: try the next candidate."""
+    import automation_app_dianping.session as session_module
+
+    _install_fast_clock(monkeypatch)
+    photo = _write_jpeg(tmp_path)
+    name = "IMG99999999_kk.jpg"
+
+    class KeyMissDevice(_FakeGalleryDevice):
+        """Transient lookup failure: the very first find_element raises
+        KeyError (kit's "did not resolve" signal). The fallback tile folds
+        select semantics into its click purely so the test can prove the
+        flow RECOVERED via the fallback candidate — the unit under test is
+        the fallthrough, not the app."""
+
+        def __init__(self, name):
+            super().__init__(name)
+            self.keyerror_seen = False
+
+        def __call__(self, **kwargs):
+            # Tile-pick lookups are the only ones carrying `instance`; fire
+            # the transient KeyError on the first of exactly those so the
+            # prep/exists checks are untouched.
+            is_tile_lookup = (
+                kwargs.get("resourceId") in (self.SELECT_ID, self.PHOTO_ID)
+                and "instance" in kwargs
+            )
+            if is_tile_lookup and not self.keyerror_seen:
+                self.keyerror_seen = True
+                raise KeyError("element lookup failed (simulated transient)")
+            widget = super().__call__(**kwargs)
+            if kwargs.get("resourceId") == self.PHOTO_ID:
+                base_click = widget.click
+
+                def click_with_select():
+                    base_click()
+                    self.selected.add(int(kwargs.get("instance", 0)))
+
+                widget.click = click_with_select
+            return widget
+
+    device = KeyMissDevice(name)
+    kit = _PickerKit(device)
+    monkeypatch.setattr(
+        session_module,
+        "_import_kit_uia2_session",
+        lambda: type("C", (), {"__call__": lambda self, *a, **k: kit}),
+    )
+    session = session_module.DianpingUia2Session(kit, captcha_window_seconds=0)
+    session._session.driver = device
+    from automation_app_dianping.config import default_selectors
+
+    selectors = default_selectors()
+    result = session.execute_action(
+        "pick_photos",
+        photos=[str(photo)],
+        add_selector=selectors.add_photo,
+        thumbnail_selector=selectors.photo_thumbnail,
+        confirm_selector=selectors.photo_confirm,
+    )
+
+    # The KeyError candidate was skipped, the fallback candidate recovered.
+    assert device.keyerror_seen, "transient KeyError never simulated"
+    assert result.success, result.message
+    assert any(
+        c.get("resourceId") == device.PHOTO_ID for c in device.lookups
+    ), "fallback candidate never attempted"
