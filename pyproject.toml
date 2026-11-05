@@ -1,6 +1,6 @@
 [project]
 name = "automation-app-dianping"
-version = "0.3.0"
+version = "0.4.0"
 description = "Dianping application workflows built on automation-kit"
 authors = [{ name = "mango" }]
 readme = "README.md"
@@ -11,7 +11,7 @@ requires-python = ">=3.8,<4.0"
 # 这一行只记录本应用适配的 kit 版本区间，因此从不被包源解析。若将来 kit 上架，
 # 本行即为可直接解析的依赖，无需改动。
 dependencies = [
-    "automation-kit>=0.5.0,<0.6.0",
+    "automation-kit>=0.5.0,<0.7.0",
     # pick_photos stages review images through PIL (EXIF rewrite, alpha flatten).
     # Python 3.8 resolves to Pillow 10.x via Requires-Python; no 3.9-only cap.
     "Pillow>=9,<13",
@@ -40,7 +40,7 @@ slidex = [
 # Packaging/build backend remains setuptools with [project] metadata.
 [tool.poetry]
 name = "automation-app-dianping"
-version = "0.3.0"
+version = "0.4.0"
 description = "Dianping application workflows built on automation-kit"
 authors = ["mango"]
 readme = "README.md"
