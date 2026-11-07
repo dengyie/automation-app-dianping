@@ -223,7 +223,9 @@ def build_live_workflow(
         draft = DraftStore(Path(data_dir)).load(draft_id)
         if draft is None:
             raise FileNotFoundError("draft not found: %s" % draft_id)
-        assert_publish_allowed(draft=draft, config=config, data_dir=Path(data_dir))
+        assert_publish_allowed(
+            draft=draft, config=config, data_dir=Path(data_dir), no_submit=bool(no_submit)
+        )
         parameters = draft_to_publish_parameters(draft)
         parameters["photos"] = _resolve_publish_photos(
             parameters.get("photos"),

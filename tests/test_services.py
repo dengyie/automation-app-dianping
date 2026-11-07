@@ -55,3 +55,23 @@ def test_assert_publish_allowed_rejects_short_content(tmp_path: Path):
     config = DianpingAppConfig(city="shanghai")
     with pytest.raises(PublishGateError):
         assert_publish_allowed(draft=draft, config=config, data_dir=tmp_path)
+
+
+def test_assert_publish_allowed_no_submit_skips_bookkeeping_gates(tmp_path: Path):
+    """no_submit rehearsal: an already-published draft passes the gate —
+    the rehearsal stops before the submit tap, so published-at / quota /
+    interval bookkeeping is irrelevant. Content validation still applies."""
+    published = _draft(status="published", published_at="2026-11-01T00:00:00Z")
+    config = DianpingAppConfig(city="shanghai")
+    with pytest.raises(PublishGateError, match="already published"):
+        assert_publish_allowed(draft=published, config=config, data_dir=tmp_path)
+    # same draft, rehearsal mode → allowed
+    assert_publish_allowed(
+        draft=published, config=config, data_dir=tmp_path, no_submit=True
+    )
+    # short content is still rejected even in rehearsal mode
+    short = _draft(content="太短", status="published", published_at="2026-11-01T00:00:00Z")
+    with pytest.raises(PublishGateError):
+        assert_publish_allowed(
+            draft=short, config=config, data_dir=tmp_path, no_submit=True
+        )

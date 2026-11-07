@@ -52,6 +52,7 @@ def assert_publish_allowed(
     draft: DraftRecord,
     config: DianpingAppConfig,
     data_dir: Path = Path("data"),
+    no_submit: bool = False,
 ) -> None:
     error = validate_review_content(
         draft.draft.content,
@@ -60,6 +61,12 @@ def assert_publish_allowed(
     )
     if error:
         raise PublishGateError(error)
+    if no_submit:
+        # Authorized rehearsal stops right before the submit tap, so the
+        # externally-visible bookkeeping gates (already-published, daily
+        # quota, interval) do not apply — a published draft is exactly the
+        # interesting rehearsal target. Content validation above still runs.
+        return
     if draft.published_at or draft.draft.status == "published":
         raise PublishGateError("draft already published: %s" % draft.id)
 
