@@ -6,7 +6,10 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # ubuntu-24.04: ubuntu-latest (26.04) no longer ships a Python 3.8
+    # toolchain, and the package still supports >=3.8 — pin until the
+    # support floor moves.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
