@@ -5652,3 +5652,55 @@ def test_uia2_clear_dish_edit_eight_removals_then_clean(monkeypatch):
     session._dump_source = staged
     r = session._clear_dish_edit_photos()
     assert r.success and "cleared 8 dish-edit photo(s)" in r.message
+
+
+def test_uia2_navigate_search_fallback_reestablishes_home(monkeypatch):
+    """Live 2026-11-08 regression: pending path opens 我的 → 待评价, shop is
+    missing, ONE back lands on the 我的 tab (not home). The search fallback
+    must re-establish home before tapping the search bar — previously it
+    burned all 8 selectors on the profile page."""
+    _fast_clock(monkeypatch)
+    base = {
+        "shop_name": "味香斋(雁荡路店)",
+        "write_selector": 'uiautomator:new UiSelector().text("写评价")',
+        "search_bar": 'uiautomator:new UiSelector().text("搜索")',
+        "search_input": 'uiautomator:new UiSelector().text("搜索店名、菜品")',
+        "search_confirm": None,
+        "search_results_marker": 'uiautomator:new UiSelector().text("有点评")',
+        "shop_result": None,
+    }
+    # Dump 1 (home check at entry): home with search bar AND 我的 tab →
+    # pending path engages. Dumps 2..k (pending flow): 我的 tab page with
+    # 待评价 entry; the shop row never appears. The fallback's home check
+    # re-dumps: still 我的 tab (no 搜索) → _back_to_home_search presses BACK
+    # and its post-BACK dump shows home with the search bar → search tap.
+    pending_page = _nav_source(
+        '<node text="我的" bounds="[900,2300][1000,2380]"/>',
+        '<node text="待评价" bounds="[100,400][260,450]"/>',
+    )
+    home = _nav_source(
+        _SEARCH_BAR_NODE,
+        '<node text="我的" bounds="[900,2300][1000,2380]"/>',
+    )
+    dumps = [
+        home,          # entry source read (page-identity checks)
+        home,          # entry on_home check → True (skip BACK unwind)
+        pending_page,  # pending path: 我的 tab check
+        pending_page,  # 我的 tab tap dump + 待评价 wait
+        pending_page,  # pending row wait (never matches)
+        pending_page,  # fallback on_home check → absent → BACK path
+        pending_page,  # _back_to_home_search pre-BACK read
+        home,          # post-BACK marker check → home reached
+        home,          # fallback search-bar tap dump
+    ]
+    driver = _NavDriver(dumps)
+    session = DianpingUia2Session(_SeqKit(driver), captcha_window_seconds=0)
+    result = session._navigate_to_review_editor(**base)
+    # the flow got past the fallback home re-establishment: it tapped the
+    # search bar (coordinate click recorded) and moved on to wait for the
+    # search-input marker, which never appears on this static dump.
+    assert "home search bar not reached" not in result.message
+    assert result.message in (
+        "timed out waiting for page marker",
+    ) or "marker" in result.message
+    assert len(driver.clicks) >= 1

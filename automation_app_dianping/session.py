@@ -2410,6 +2410,23 @@ class DianpingUia2Session:
             "falling back to search" % pending.message,
             flush=True,
         )
+        # The pending path only backs out of the 待评价 list — one BACK lands
+        # on the 我的 tab, not home (live 2026-11-08: the search fallback then
+        # burned all 8 search-bar selectors on the profile page). Re-establish
+        # home before tapping the search bar.
+        if not self._marker_present_now(kwargs.get("search_bar")):
+            recovered = self._back_to_home_search(kwargs)
+            if not recovered.success:
+                return ActionResult(
+                    False,
+                    "navigate_to_review_editor: home search bar not reached "
+                    "after pending fallback: %s" % recovered.message,
+                )
+            print(
+                "[dianping-uia2] navigate: BACK unwind reached home search "
+                "for the search fallback",
+                flush=True,
+            )
         tap = self._tap_with_clickable_parent({"selector": kwargs.get("search_bar")})
         if not tap.success:
             return tap
