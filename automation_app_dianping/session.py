@@ -2724,16 +2724,23 @@ class DianpingUia2Session:
             result = self._session.execute_action("tap", selector=value, by=by)
             if result.success:
                 return result
-        # ENTER fallback: the kit uia2 adapter passes unknown actions to the
-        # uiautomator2 device, which exposes press_key.
+        # ENTER fallback: the kit uia2 adapter routes unknown actions to
+        # getattr(device, action_name)() with no args, so the keycode must go
+        # through a device method that takes it (u2 press_key(keycode)).
         press = getattr(self._session.driver, "press_key", None)
         if callable(press):
             keycode = kwargs.get("keycode")
             if isinstance(keycode, bool) or not isinstance(keycode, (int, float)):
                 return ActionResult(False, "confirm_search keycode must be numeric")
-            press_result = self._session.execute_action("press_key", int(keycode))
-            if press_result.success:
-                return ActionResult(True, "confirm_search via keycode")
+            try:
+                pressed = press(int(keycode))
+            except Exception as exc:
+                return ActionResult(False, "confirm_search press_key failed: %s" % exc)
+            if isinstance(pressed, ActionResult):
+                if pressed.success:
+                    return ActionResult(True, "confirm_search via keycode")
+                return pressed
+            return ActionResult(True, "confirm_search via keycode")
         return ActionResult(False, "confirm_search failed for all selectors")
 
     def _hide_keyboard(self, **kwargs: Any) -> ActionResult:
