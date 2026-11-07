@@ -215,9 +215,16 @@ def generate_review_photo(
             # escape this helper, or a publish would break for want of a photo.
             last_error = exc
     if last_error is not None:
+        # Include the HTTP status when the gateway answered -- "HTTPError"
+        # alone made the 2026-11-08 live failures (Cloudflare 1010, then a
+        # 503 auth_not_found) undiagnosable from the console output alone.
+        detail = type(last_error).__name__
+        code = getattr(last_error, "code", None)
+        if isinstance(code, int):
+            detail = "%s %d" % (detail, code)
         print(
             "[dianping-photos] image generation failed after %d attempt(s): %s"
-            % (attempts, type(last_error).__name__),
+            % (attempts, detail),
             flush=True,
         )
     return None

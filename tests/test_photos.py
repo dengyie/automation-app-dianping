@@ -339,6 +339,53 @@ def test_generate_review_photo_budget_exhausted_skips_attempts(monkeypatch, tmp_
     assert result is None
 
 
+def test_generate_review_photo_failure_log_carries_status_code(monkeypatch, tmp_path, capsys):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from automation_app_dianping.imagegen import generate_review_photo
+
+    def _fake_urlopen(request, timeout=None, *args, **kwargs):
+        raise urllib.error.HTTPError(
+            request.full_url, 503, "Service Unavailable", {},
+            io.BytesIO(b'{"error":{"message":"auth_not_found"}}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(
+        "automation_app_dianping.imagegen.time.sleep", lambda _s: None
+    )
+    result = generate_review_photo(
+        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_CPA_API_KEY": "sk-test"}
+    )
+    assert result is None
+    # Live 2026-11-08: a bare "HTTPError" hid whether the gateway answered
+    # 1010 (WAF) or 503 (no upstream auth) -- the status must be in the log.
+    assert "HTTPError 503" in capsys.readouterr().out
+
+
+def test_generate_review_photo_non_http_error_log_keeps_type_only(monkeypatch, tmp_path, capsys):
+    import urllib.request
+
+    from automation_app_dianping.imagegen import generate_review_photo
+
+    def _fake_urlopen(request, timeout=None, *args, **kwargs):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(
+        "automation_app_dianping.imagegen.time.sleep", lambda _s: None
+    )
+    result = generate_review_photo(
+        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_CPA_API_KEY": "sk-test"}
+    )
+    assert result is None
+    out = capsys.readouterr().out
+    assert "TimeoutError" in out
+    assert "None" not in out  # a missing .code must not print "None"
+
+
 def test_save_image_uniquifies_same_second_collision(monkeypatch, tmp_path):
     import pathlib
 
