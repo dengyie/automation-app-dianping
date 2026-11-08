@@ -237,3 +237,51 @@ def test_cmd_doctor_warns_when_no_device_attached(monkeypatch, capsys):
     assert exit_code == 2
     assert report["adb_devices"] == []
     assert any("No adb devices" in hint for hint in report["hints"])
+
+
+def test_cmd_doctor_reports_slidex_vision_channel(monkeypatch, capsys):
+    """slidex risk-control section: installed version + vision-channel state;
+    key values are never echoed (2026-11-09 slidex integration)."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "appium", types.ModuleType("appium"))
+
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=0: _Response())
+    monkeypatch.setattr(
+        "subprocess.check_output",
+        lambda *args, **kwargs: "List of devices attached\n1.2.3.4\tdevice\n",
+    )
+    monkeypatch.delenv("SLIDEX_VISION_ENDPOINT", raising=False)
+    monkeypatch.delenv("SLIDEX_VISION_API_KEY", raising=False)
+    monkeypatch.delenv("SLIDEX_VISION_MODEL", raising=False)
+
+    exit_code = cli.cmd_doctor(
+        SimpleNamespace(appium_host="127.0.0.1", appium_port=4723)
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert report["slidex"]["installed"] is True
+    assert report["slidex"]["version"]
+    assert report["slidex"]["vision_channel"] == "not configured"
+
+    # Channel fully configured -> reported, and the key value stays out.
+    monkeypatch.setenv("SLIDEX_VISION_ENDPOINT", "https://api.example/v1/chat/completions")
+    monkeypatch.setenv("SLIDEX_VISION_API_KEY", "sk-secret-do-not-echo")
+    monkeypatch.setenv("SLIDEX_VISION_MODEL", "gemini-3.8-flash")
+    exit_code = cli.cmd_doctor(
+        SimpleNamespace(appium_host="127.0.0.1", appium_port=4723)
+    )
+    out = capsys.readouterr().out
+    report = json.loads(out)
+    assert report["slidex"]["vision_channel"] == "configured"
+    assert "sk-secret-do-not-echo" not in out

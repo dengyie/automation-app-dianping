@@ -48,6 +48,22 @@ python -m pip install "slidex @ git+https://github.com/dengyie/slidex.git@288f55
 # 本地 sibling 开发（须与该 SHA 对齐）：python -m pip install -e ../slidex
 ```
 
+### 风控能力（slidex，2026-11-09 接入）
+
+live 彩排/发布加 `--enable-slidex` 后，遇到滑块验证码由 slidex **纯图像引擎**本地求解
+（截图 → 缺口定位 → 轨迹执行），无需任何 key。点选/字符图形类验证码走**多模态视觉
+通道**，由三个环境变量驱动（`.env` 已接入，doctor 会报告配置状态）：
+
+```bash
+SLIDEX_VISION_ENDPOINT=https://api.mangoqwq.com/v1/chat/completions
+SLIDEX_VISION_API_KEY=sk-...            # 复用网关专用 key
+SLIDEX_VISION_MODEL=gemini-3.8-flash    # 须为网关 /v1/models 实测可用的多模态 chat 模型
+```
+
+三变量缺任一：滑块仍可用，点选/字符类挑战返回 `vision_not_configured`（不可重试）。
+`python -m automation_app_dianping doctor` 的 `slidex` 段报告安装版本与通道状态
+（只报配置与否，不回显 key）。
+
 ## Python 应用层用法
 
 ### smoke workflow

@@ -195,6 +195,29 @@ def cmd_doctor(args) -> int:
             report["hints"].append("No adb devices connected")
     except Exception:
         report["hints"].append("adb not found")
+    # slidex risk-control capability (2026-11-09): the slider solve is pure
+    # image analysis and needs no key; the point-select/graph-captcha vision
+    # channel is env-driven and must be complete or those challenges fail
+    # with vision_not_configured. Report configuration, never key values.
+    slidex_entry = {"installed": False, "version": "", "vision_channel": "not configured"}
+    try:
+        import importlib.metadata as _meta
+
+        slidex_entry["installed"] = True
+        slidex_entry["version"] = _meta.version("slidex")
+    except Exception:
+        report["hints"].append("pip install 'slidex' for --enable-slidex risk control")
+    if all(
+        os.environ.get(name, "").strip()
+        for name in ("SLIDEX_VISION_ENDPOINT", "SLIDEX_VISION_API_KEY", "SLIDEX_VISION_MODEL")
+    ):
+        slidex_entry["vision_channel"] = "configured"
+    elif slidex_entry["installed"]:
+        report["hints"].append(
+            "set SLIDEX_VISION_ENDPOINT/_API_KEY/_MODEL for point-select challenges "
+            "(sliders work without them)"
+        )
+    report["slidex"] = slidex_entry
     print(json.dumps(report, ensure_ascii=False, indent=2))
     ready = report["appium_python_client"] and report["appium_server"] and bool(report["adb_devices"])
     return 0 if ready else 2
