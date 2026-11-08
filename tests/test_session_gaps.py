@@ -1003,12 +1003,20 @@ def test_uia2_rate_overall_taps_star(monkeypatch):
 
 def test_uia2_dismiss_dialogs_counts_and_skips(monkeypatch):
     _fast_clock(monkeypatch)
-    dumps = ["<hierarchy/>", "<hierarchy/>"]
+    # Probe-first: a healthy dump with the dialog present drives the taps;
+    # an empty hierarchy means nothing to dismiss (no blind-wait tax).
+    dialog = '<hierarchy><node content-desc="确定" bounds="[400,900][680,1000]"/></hierarchy>'
+    dumps = [dialog, dialog, dialog]
     kit = _SeqKit(_SeqDriver(dumps))
     session = DianpingUia2Session(kit, captcha_window_seconds=0)
     result = session.execute_action("dismiss_dialogs", selector="~确定", max_attempts=2)
     assert result.success
     assert result.data == {"dismissed": 2}
+
+    empty = _SeqKit(_SeqDriver(["<hierarchy/>"]))
+    session_empty = DianpingUia2Session(empty, captcha_window_seconds=0)
+    r_empty = session_empty.execute_action("dismiss_dialogs", selector="~确定")
+    assert r_empty.success and r_empty.data == {"dismissed": 0}
 
     dish = _SeqKit(_SeqDriver(["<hierarchy><node text=\"识别菜品\"/></hierarchy>"]))
     session2 = DianpingUia2Session(dish, captcha_window_seconds=0)
@@ -2443,7 +2451,7 @@ def test_uia2_dismiss_dialogs_dish_edit_skip_and_counts(monkeypatch):
     assert r1.success and "skipped; dish-edit open" in r1.message
 
     # one tap hits, then nothing does → dismissed=1 (3800-3813)
-    d2 = _WidgetDriver("<hierarchy/>")
+    d2 = _WidgetDriver('<hierarchy><node content-desc="关闭" bounds="[400,900][680,1000]"/></hierarchy>')
     kit2 = _SeqKit(d2)
     kit2.calls = []
 
@@ -4222,7 +4230,9 @@ def test_uia2_dismiss_dialogs_counts_and_dispatch(monkeypatch):
     """_dismiss_dialogs with candidates that translate: tap hits count
     (3835-3841); attempts exhausted → success anyway (3849-3850)."""
     _fast_clock(monkeypatch)
-    kit = _SeqKit(_NavDriver(["<hierarchy/>"]))
+    # Probe-first: the dump must show the dialog for taps to fire.
+    dialog = '<hierarchy><node text="残忍拒绝" bounds="[400,900][680,1000]"/></hierarchy>'
+    kit = _SeqKit(_NavDriver([dialog]))
     kit.results["tap"] = ActionResult(True, "dialog tapped")
     session = DianpingUia2Session(kit, captcha_window_seconds=0)
     out = session._dismiss_dialogs(
@@ -5704,3 +5714,106 @@ def test_uia2_navigate_search_fallback_reestablishes_home(monkeypatch):
         "timed out waiting for page marker",
     ) or "marker" in result.message
     assert len(driver.clicks) >= 1
+
+
+def test_uia2_navigate_search_input_wait_recovers_via_secondary_marker(monkeypatch, capsys):
+    """Live 2026-11-09: after the search-bar tap the search page WAS open
+    (history list and input visible; adb's own dump showed
+    search_keyword_edit) while 8s of session dumps came back empty/stale.
+    The input-marker wait must re-probe once with the search page's own
+    header markers as secondary evidence instead of dying on the primary
+    selector."""
+    _fast_clock(monkeypatch)
+    base = {
+        "shop_name": "味香斋(雁荡路店)",
+        "write_selector": 'uiautomator:new UiSelector().text("写评价")',
+        "search_bar": 'uiautomator:new UiSelector().text("搜索")',
+        "search_input": (
+            'uiautomator:new UiSelector().resourceId('
+            '"com.dianping.v1:id/search_keyword_edit")'
+        ),
+        "search_confirm": None,
+        "search_results_marker": 'uiautomator:new UiSelector().text("有点评")',
+        "shop_result": None,
+    }
+    home = _nav_source(_SEARCH_BAR_NODE)  # no 我的 tab: the pending path bails
+    # Search page restored from history: header present, but the input node
+    # is missing from this dump (the stale-dump variant) — the primary
+    # selector misses and only the secondary header can prove readiness.
+    search_page = _nav_source(
+        '<node text="历史搜索" bounds="[40,300][200,360]"/>',
+        '<node text="味香斋(雁荡路店)" bounds="[40,400][400,460]"/>',
+    )
+    dumps = [
+        home,  # entry source read (page-identity checks)
+        home,  # on_home check -> search bar present
+        home,  # pending path: 我的 tab check -> absent -> bail
+        home,  # fallback home check -> present -> skip BACK unwind
+        home,  # search-bar tap dump
+    ]
+    # First wait (8s): ~2 empty dumps per poll iteration (retry-after-wake).
+    dumps += [""] * 20
+    dumps += [search_page]  # second wait: header marker matches
+    driver = _NavDriver(dumps)
+    session = DianpingUia2Session(_SeqKit(driver), captcha_window_seconds=0)
+    result = session._navigate_to_review_editor(**base)
+    out = capsys.readouterr().out
+    assert "secondary markers after a dump glitch" in out
+    # The flow moved past both input waits; it dies honestly at the results
+    # marker, which the static fixture never shows.
+    assert result.message == "timed out waiting for page marker (12.0s)"
+
+
+def test_uia2_navigate_pending_tap_fail_does_not_back_out_of_home(monkeypatch):
+    """Live 2026-11-09 (second rehearsal): the pending path's 我的 tab tap
+    failed with -32002 while the flow was standing ON home; the fallback's
+    one-shot home re-check then read a stale dump, said "not home", and the
+    BACK it triggered walked OUT of home into a dead end. A false miss must
+    be corrected by the confirmation re-reads without any BACK press."""
+    _fast_clock(monkeypatch)
+    base = {
+        "shop_name": "味香斋(雁荡路店)",
+        "write_selector": 'uiautomator:new UiSelector().text("写评价")',
+        "search_bar": 'uiautomator:new UiSelector().text("搜索")',
+        "search_input": 'uiautomator:new UiSelector().text("搜索店名、菜品")',
+        "search_confirm": None,
+        "search_results_marker": 'uiautomator:new UiSelector().text("有点评")',
+        "shop_result": None,
+    }
+    home = _nav_source(
+        _SEARCH_BAR_NODE,
+        '<node text="我的" bounds="[900,2300][1000,2380]"/>',
+    )
+    # The pending path bails cleanly (no 我的 on this dump -> no tap, no
+    # BACK, flow still standing on home), then the fallback home re-check
+    # hits the stale window the live run showed: two reads lose the search
+    # bar, the third finds it again.
+    home_no_my = _nav_source(_SEARCH_BAR_NODE)
+    stale = "<hierarchy><node bounds=\"[0,0][100,100]\"/></hierarchy>"
+    dumps = [
+        home,        # entry source read
+        home,        # entry on_home check -> True
+        home_no_my,  # pending path: 我的 tab check -> absent -> clean bail
+        stale,       # fallback confirm read #1 -> false miss
+        stale,       # fallback confirm read #2 -> false miss
+        home_no_my,  # fallback confirm read #3 -> home back -> NO back_unwind
+        home_no_my,  # search-bar tap dump
+    ]
+    driver = _NavDriver(dumps)
+    session = DianpingUia2Session(_SeqKit(driver), captcha_window_seconds=0)
+    result = session._navigate_to_review_editor(**base)
+    # No BACK was pressed anywhere: the flow never left home, so the dead
+    # end from the live run cannot recur. The coordinate search-bar tap ran.
+    assert driver.presses == []
+    assert len(driver.clicks) >= 1
+    assert "home search bar not reached" not in result.message
+
+
+def test_dialog_dismiss_covers_leftover_review_modal():
+    """Live 2026-11-09: the previous no-submit rehearsal's editor state pops
+    an intercepting '你有一条编辑中的评价' modal on launch; 暂不查看 discards
+    it without jumping into the editor. The selector must stay in the list."""
+    from automation_app_dianping.config import default_selectors
+
+    raw = [str(c) for c in default_selectors().dialog_dismiss]
+    assert any("暂不查看" in c for c in raw)

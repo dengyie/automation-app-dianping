@@ -124,6 +124,11 @@ class DianpingSelectors:
         'uiautomator:new UiSelector().text("确定")',
         'uiautomator:new UiSelector().text("关闭")',
         'uiautomator:new UiSelector().text("取消")',
+        # Live 2026-11-09: a leftover in-progress review (the previous
+        # no-submit rehearsal's editor state) pops an intercepting modal on
+        # launch — 暂不查看 discards the prompt without jumping into the
+        # editor; the home search bar is unreachable while it is up.
+        'uiautomator:new UiSelector().text("暂不查看")',
         "~关闭",
     )
     # 2026-09 editor geometry (OnePlus 7T, 1080px width). The overall row

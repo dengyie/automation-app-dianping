@@ -2413,8 +2413,18 @@ class DianpingUia2Session:
         # The pending path only backs out of the 待评价 list — one BACK lands
         # on the 我的 tab, not home (live 2026-11-08: the search fallback then
         # burned all 8 search-bar selectors on the profile page). Re-establish
-        # home before tapping the search bar.
-        if not self._marker_present_now(kwargs.get("search_bar")):
+        # home before tapping the search bar. A one-shot dump read flakes
+        # (live 2026-11-09: the check said "not home" while the flow was
+        # standing ON home after a failed tab tap, and the BACK it triggered
+        # walked out of home into a dead end), so a miss is confirmed on two
+        # re-reads before any BACK is pressed.
+        home_seen = self._marker_present_now(kwargs.get("search_bar"))
+        for _ in range(2):
+            if home_seen:
+                break
+            time.sleep(0.6)
+            home_seen = self._marker_present_now(kwargs.get("search_bar"))
+        if not home_seen:
             recovered = self._back_to_home_search(kwargs)
             if not recovered.success:
                 return ActionResult(
@@ -2433,7 +2443,21 @@ class DianpingUia2Session:
         print("[dianping-uia2] navigate: search bar tapped (%s)" % tap.message, flush=True)
         wait = self._wait_for_marker(kwargs.get("search_input"), 8.0)
         if not wait.success:
-            return wait
+            # One bounded re-probe with the search page's own header markers
+            # added: the input id can be absent from stale/empty session dumps
+            # even when the page is visibly open (live 2026-11-09).
+            wait = self._wait_for_marker(
+                list(as_selector_list(kwargs.get("search_input")))
+                + list(self._SEARCH_PAGE_SECONDARY_MARKERS),
+                6.0,
+            )
+            if not wait.success:
+                return wait
+            print(
+                "[dianping-uia2] navigate: search page ready via secondary "
+                "markers after a dump glitch",
+                flush=True,
+            )
         print("[dianping-uia2] navigate: search page ready", flush=True)
         typed = self._with_translated_candidates(
             "type_text",
@@ -2467,6 +2491,17 @@ class DianpingUia2Session:
     _EDITOR_OPEN_MARKER = (
         'uiautomator:new UiSelector().textContains("添加图")',
         'uiautomator:new UiSelector().text("发布")',
+    )
+    _SEARCH_PAGE_SECONDARY_MARKERS = (
+        # Live 2026-11-09: right after the bar tap the search page WAS open
+        # (history list and input on screen; adb's own dump showed
+        # search_keyword_edit) while 8s of session dumps came back empty or
+        # stale -- a transient UiAutomation glitch across the app restart.
+        # The suggestion page's own headers are secondary evidence the page
+        # is ready; typing still targets the real input and fails honestly
+        # if it truly is absent.
+        'uiautomator:new UiSelector().textContains("历史搜索")',
+        'uiautomator:new UiSelector().textContains("搜索发现")',
     )
 
     def _marker_present_now(self, candidates: Any) -> bool:
@@ -3804,6 +3839,23 @@ class DianpingUia2Session:
         finally:
             self._manual_window_active = False
 
+    def _present_candidates(self, candidates: Any) -> Optional[list]:
+        """(by, value) pairs actually on screen, or None when the hierarchy
+        is unavailable/unparseable (the caller then falls back to blind taps
+        so a wedged dump channel cannot silently skip real dialogs)."""
+        source = self._hierarchy_source()
+        if not source:
+            return None
+        try:
+            root = ET.fromstring(source)
+        except (ET.ParseError, TypeError):
+            return None
+        return [
+            (by, value)
+            for by, value in candidates
+            if any(_node_matches_selector(n, by, value) for n in root.iter("node"))
+        ]
+
     def _dismiss_dialogs(self, **kwargs: Any) -> ActionResult:
         if dish_edit_is_open(self._hierarchy_source()):
             return ActionResult(True, "dismiss_dialogs skipped; dish-edit open")
@@ -3816,8 +3868,15 @@ class DianpingUia2Session:
                 candidates.append(translated)
         dismissed = 0
         for _ in range(max_attempts):
+            present = self._present_candidates(candidates)
+            if present is not None and not present:
+                # A healthy dump shows none of the candidates: tapping blind
+                # burns the kit's implicit wait per missing candidate (~8s
+                # each, ~48s per launch with no dialog on screen -- live
+                # 2026-11-09). Nothing to dismiss this round.
+                break
             hit = False
-            for by, value in candidates:
+            for by, value in present if present is not None else candidates:
                 result = self._session.execute_action("tap", selector=value, by=by)
                 if result.success:
                     dismissed += 1
