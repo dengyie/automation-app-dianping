@@ -924,6 +924,7 @@ class _FakeGalleryDevice:
     ):
         self.pushed = []
         self.pushed_payloads = []
+        self.album_rows = 0
         self.shell_calls = []
         self.lookups = []
         self.clicks = []
@@ -970,6 +971,42 @@ class _FakeGalleryDevice:
             return _EDITOR_ONE_LEFTOVER_PHOTO_XML
         return _EDITOR_ADD_PHOTO_XML
 
+    def _album_grid_xml(self, rows):
+        """Picker content grid with one photo+select tile per staged row."""
+        tiles = []
+        for i in range(rows):
+            x1 = 20 + (i % 3) * 353
+            y1 = 192 + (i // 3) * 410
+            x2, y2 = x1 + 200, y1 + 200
+            sx1, sy1, sx2, sy2 = x1 + 120, y1 + 20, x1 + 180, y1 + 80
+            tiles.append(
+                '  <node resource-id="%s" class="android.widget.ImageView" '
+                'clickable="true" bounds="[%d,%d][%d,%d]" />\n'
+                '  <node resource-id="%s" class="android.widget.FrameLayout" '
+                'clickable="true" bounds="[%d,%d][%d,%d]">\n'
+                '    <node resource-id="%s" class="android.widget.TextView" '
+                'clickable="false" bounds="[%d,%d][%d,%d]" />\n'
+                "  </node>\n"
+                % (
+                    self.PHOTO_ID, x1, y1, x2, y2,
+                    self.SELECT_ID, sx1, sy1, sx2, sy2,
+                    self.BADGE_ID, sx1 + 8, sy1 + 8, sx2 - 8, sy2 - 8,
+                )
+            )
+        return (
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n<hierarchy>\n"
+            '  <node class="android.widget.FrameLayout" clickable="true" '
+            'bounds="[430,103][649,156]">\n'
+            '    <node text="DianpingAuto" class="android.widget.TextView" '
+            'clickable="false" bounds="[430,103][610,156]" />\n'
+            "  </node>\n" + "".join(tiles) +
+            '  <node class="android.widget.FrameLayout" clickable="true" '
+            'bounds="[833,2287][1036,2366]">\n'
+            '    <node text="下一步" class="android.widget.TextView" clickable="false" '
+            'bounds="[885,2307][984,2346]" />\n'
+            "  </node>\n</hierarchy>\n"
+        )
+
     def dump_hierarchy(self):
         if self.dish_edit_open and self.delete_dialog:
             return self.hierarchy.replace(
@@ -983,6 +1020,16 @@ class _FakeGalleryDevice:
                 "  </node>\n"
                 "</hierarchy>",
             )
+        if (
+            self.picker_open
+            and self.album == "DianpingAuto"
+            and self.album_rows > 1
+        ):
+            # Truthful grid: one photo+select tile per staged row -- and only
+            # once the picker really is on the staging album (a stateless
+            # override would fake the header during the dropdown phase and
+            # let the switch check pass while the view is still 最近项目).
+            return self._album_grid_xml(self.album_rows)
         return self.hierarchy
 
     def click(self, x, y):
@@ -1155,6 +1202,14 @@ class _FakeGalleryDevice:
     def shell(self, args):
         self.shell_calls.append(list(args))
         joined = " ".join(args)
+        if "content delete" in joined:
+            # album cleanup (2026-11-09): rows go before the files
+            self.album_rows = 0
+            return _FakeShellResponse("")
+        if "content query" in joined and "--projection _id" in joined:
+            # staging-album row count gate
+            payload = "".join("Row: %d _id=%d\n" % (i, 500 + i) for i in range(self.album_rows))
+            return _FakeShellResponse(payload)
         if "--where" in joined and self._name in joined:
             # index lifecycle: absent → present-but-NULL → real row
             n = len(
@@ -1180,9 +1235,12 @@ class _FakeGalleryDevice:
                 "Row: 0 _display_name=%s, datetaken=1789859011371\n"
                 "Row: 1 _display_name=other.jpg, datetaken=1" % self._name
             )
-        return _FakeShellResponse(
-            "Broadcasting: Intent { act=MEDIA_SCANNER_SCAN_FILE }"
-        )
+        if "MEDIA_SCANNER_SCAN_FILE" in joined:
+            self.album_rows += 1
+            return _FakeShellResponse(
+                "Broadcasting: Intent { act=MEDIA_SCANNER_SCAN_FILE }"
+            )
+        return _FakeShellResponse("")
 
 
 def _write_jpeg(tmp_path, name="gni.jpg"):

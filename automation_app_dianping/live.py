@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from automation_app_dianping.config import DianpingDeviceConfig
+from automation_app_dianping.imagegen import dish_hint_from_content
 
 LIVE_FLAG = "DIANPING_LIVE_E2E"
 
@@ -156,41 +157,6 @@ def build_live_smoke_workflow(
     )
 
 
-def _dish_hint_from_content(content: str) -> str:
-    """Pull a dish hint for the photo prompt out of the review content.
-
-    The review body always names what was eaten, but no upstream field
-    carries a clean dish name (draft ``recommendedDishes`` was never
-    populated). A regex over free prose is too fragile (real drafts yield
-    "肉套餐性价比"/"对肉食爱好者"), so match against a dish-word lexicon:
-    the longest dish term appearing in the text wins. Best-effort — no
-    match keeps the generic signature-dish prompt instead of forcing a
-    wrong subject into the generated photo.
-    """
-    _DISH_WORDS = (
-        # noodles & rice
-        "拌面", "汤面", "炒面", "拉面", "牛肉面", "辣肉面", "麻酱面", "葱油拌面",
-        "盖浇饭", "煲仔饭", "叉烧饭", "烧鹅饭", "鳗鱼饭", "石锅拌饭",
-        # shanghai classics
-        "生煎", "小笼", "锅贴", "烧卖", "汤包", "粢饭糕", "粢饭团", "油条",
-        "大馄饨", "小馄饨", "蟹粉小笼", "鲜肉生煎", "春卷", "八宝饭",
-        # meat & hotpot
-        "烤串", "羊肉串", "烤肉", "烧肉", "红烧肉", "东坡肉", "叉烧", "烤鸭",
-        "白斩鸡", "口水鸡", "辣子鸡", "火锅", "麻辣烫", "冒菜", "串串香",
-        # seafood
-        "小龙虾", "香辣蟹", "蟹粉", "三文鱼", "刺身", "寿司",
-        # sweets & drinks
-        "双皮奶", "杨枝甘露", "红豆沙", "绿豆汤", "蛋糕", "泡芙", "蛋挞",
-        "奶茶", "咖啡",
-    )
-    if not content:
-        return ""
-    found = [word for word in _DISH_WORDS if word in content]
-    if not found:
-        return ""
-    return max(found, key=len)
-
-
 def _resolve_publish_photos(
     photos,
     *,
@@ -273,7 +239,7 @@ def build_live_workflow(
             slug=draft.shop_slug,
             data_dir=data_dir,
             env=env,
-            dish_hint=_dish_hint_from_content(draft.draft.content),
+            dish_hint=dish_hint_from_content(draft.draft.content),
         )
     else:
         if not shop_name or not content:
@@ -292,7 +258,7 @@ def build_live_workflow(
                 shop_name=shop_name,
                 data_dir=data_dir,
                 env=env,
-                dish_hint=dish_hint or _dish_hint_from_content(content or ""),
+                dish_hint=dish_hint or dish_hint_from_content(content),
             ),
         }
 

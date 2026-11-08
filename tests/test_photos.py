@@ -82,7 +82,7 @@ def test_uses_generated_photo_when_no_staged(monkeypatch, tmp_path: Path):
         slug="shop",
         shop_name="小店",
         data_dir=str(tmp_path),
-        env={"DIANPING_CPA_API_KEY": "k"},
+        env={"DIANPING_GEN_API_KEY": "k"},
     )
     assert result == [str(generated)]
 
@@ -100,7 +100,7 @@ def test_disabled_resolver_skips_generation(monkeypatch, tmp_path: Path):
         slug="shop",
         shop_name="小店",
         data_dir=str(tmp_path),
-        env={"DIANPING_CPA_API_KEY": "k"},
+        env={"DIANPING_GEN_API_KEY": "k"},
         allow_generate=False,
     )
     assert result == ([str(DEFAULT_REVIEW_PHOTO)] if DEFAULT_REVIEW_PHOTO.is_file() else [])
@@ -127,14 +127,14 @@ def test_sanitize_slug_keeps_alnum_and_dashes():
 def test_safe_prompt_grounds_dish_hint():
     from automation_app_dianping.imagegen import _safe_prompt
 
-    prompt = _safe_prompt("味香斋", "焖蹄面")
+    prompt = _safe_prompt("焖蹄面")
     assert "焖蹄面" in prompt
     assert "味香斋" not in prompt
     # 2026-11-09 A/B winner: casual diner-phone-photo cues, not the glossy
     # commercial-photo template.
     assert "手机随手拍" in prompt
     assert "无文字" in prompt
-    generic = _safe_prompt("味香斋")
+    generic = _safe_prompt()
     assert "招牌菜品" in generic
     # The model can't know the shop; naming it only risks signage text.
     assert "味香斋" not in generic
@@ -218,7 +218,7 @@ def test_generate_review_photo_salvages_524_with_image(monkeypatch, tmp_path):
 
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
     result = generate_review_photo(
-        shop_name="味香斋", out_dir=str(tmp_path), env={"DIANPING_CPA_API_KEY": "sk-test"}
+        shop_name="味香斋", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-test"}
     )
     assert result is not None
     assert pathlib.Path(result).read_bytes() == png
@@ -240,7 +240,7 @@ def test_generate_review_photo_never_raises_on_http_error(monkeypatch, tmp_path)
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
     monkeypatch.setattr("automation_app_dianping.imagegen._GEN_RETRIES", 0)
     result = generate_review_photo(
-        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_CPA_API_KEY": "sk-test"}
+        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-test"}
     )
     assert result is None
 
@@ -272,15 +272,12 @@ def test_generate_review_photo_reads_os_environ_when_env_none(monkeypatch, tmp_p
         seen["auth"] = request.get_header("Authorization")
         return _FakeResp()
 
-    monkeypatch.setenv("DIANPING_CPA_API_KEY", "sk-from-os-environ")
+    monkeypatch.setenv("DIANPING_GEN_API_KEY", "sk-from-os-environ")
     # cli.main loads the repo .env into the real environment; a local working
-    # copy now carries GEN-named keys there (GEN name wins over legacy), so
-    # this os.environ-path test must clear them to stay hermetic.
-    monkeypatch.delenv("DIANPING_GEN_API_KEY", raising=False)
+    # copy carries GEN-named keys there, so this os.environ-path test must
+    # clear the rest to stay hermetic.
     monkeypatch.delenv("DIANPING_GEN_BASE_URL", raising=False)
     monkeypatch.delenv("DIANPING_GEN_IMAGE_MODEL", raising=False)
-    monkeypatch.delenv("DIANPING_CPA_BASE_URL", raising=False)
-    monkeypatch.delenv("DIANPING_CPA_IMAGE_MODEL", raising=False)
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
     result = generate_review_photo(shop_name="店", out_dir=str(tmp_path))
     assert seen["auth"] == "Bearer sk-from-os-environ"
@@ -305,7 +302,7 @@ def test_generate_review_photo_400_fails_fast(monkeypatch, tmp_path):
 
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
     result = generate_review_photo(
-        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_CPA_API_KEY": "sk-test"}
+        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-test"}
     )
     assert result is None
     assert len(calls) == 1  # 4xx cannot change on a retry -- no budget burned
@@ -330,7 +327,7 @@ def test_generate_review_photo_retries_5xx(monkeypatch, tmp_path):
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
     monkeypatch.setattr(imagegen.time, "sleep", lambda _s: None)
     result = generate_review_photo(
-        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_CPA_API_KEY": "sk-test"}
+        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-test"}
     )
     assert result is None
     assert len(calls) == imagegen._GEN_RETRIES + 1
@@ -348,7 +345,7 @@ def test_generate_review_photo_budget_exhausted_skips_attempts(monkeypatch, tmp_
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
     monkeypatch.setattr(imagegen, "_GEN_TOTAL_BUDGET_S", -1.0)
     result = generate_review_photo(
-        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_CPA_API_KEY": "sk-test"}
+        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-test"}
     )
     assert result is None
 
@@ -371,7 +368,7 @@ def test_generate_review_photo_failure_log_carries_status_code(monkeypatch, tmp_
         "automation_app_dianping.imagegen.time.sleep", lambda _s: None
     )
     result = generate_review_photo(
-        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_CPA_API_KEY": "sk-test"}
+        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-test"}
     )
     assert result is None
     # Live 2026-11-08: a bare "HTTPError" hid whether the gateway answered
@@ -392,7 +389,7 @@ def test_generate_review_photo_non_http_error_log_keeps_type_only(monkeypatch, t
         "automation_app_dianping.imagegen.time.sleep", lambda _s: None
     )
     result = generate_review_photo(
-        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_CPA_API_KEY": "sk-test"}
+        shop_name="店", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-test"}
     )
     assert result is None
     out = capsys.readouterr().out
@@ -400,9 +397,9 @@ def test_generate_review_photo_non_http_error_log_keeps_type_only(monkeypatch, t
     assert "None" not in out  # a missing .code must not print "None"
 
 
-def test_generate_review_photo_prefers_gen_name_over_legacy_cpa(monkeypatch, tmp_path):
-    """GEN-named env vars win over the legacy CPA names, and the default
-    base is the api.mangoqwq.com station (2026-11-08 gateway switch)."""
+def test_generate_review_photo_uses_gen_env_names_and_station_default(monkeypatch, tmp_path):
+    """GEN-named env vars drive base URL/model/key; with no env the request
+    goes to the api.mangoqwq.com station with gpt-image-2."""
     import urllib.request
 
     import automation_app_dianping.imagegen as imagegen
@@ -421,51 +418,25 @@ def test_generate_review_photo_prefers_gen_name_over_legacy_cpa(monkeypatch, tmp
             shop_name="店",
             out_dir=str(tmp_path),
             env={
-                "DIANPING_GEN_API_KEY": "sk-new",
-                "DIANPING_CPA_API_KEY": "sk-legacy",
+                "DIANPING_GEN_API_KEY": "sk-gen",
                 "DIANPING_GEN_BASE_URL": "https://gen.example/v1",
-                "DIANPING_CPA_BASE_URL": "https://cpa.example/v1",
                 "DIANPING_GEN_IMAGE_MODEL": "grok-imagine-image",
             },
         )
     except AssertionError:
         pass
     assert seen["url"].startswith("https://gen.example/v1")
-    assert seen["auth"] == "Bearer sk-new"
+    assert seen["auth"] == "Bearer sk-gen"
 
     # Default base/model: no env at all -> the station + gpt-image-2.
     seen.clear()
     try:
-        generate_review_photo(shop_name="店", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-new"})
-    except AssertionError:
-        pass
-    assert seen["url"] == imagegen.GEN_BASE_URL + "/images/generations"
-
-
-def test_generate_review_photo_legacy_cpa_env_still_works(monkeypatch, tmp_path):
-    """An existing local .env with only the legacy names keeps working."""
-    import urllib.request
-
-    seen = {}
-
-    def _fake_urlopen(request, timeout=None, *args, **kwargs):
-        seen["url"] = request.full_url
-        seen["auth"] = request.headers.get("Authorization")
-        raise AssertionError("stop before the network")
-
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
-    try:
-        from automation_app_dianping.imagegen import generate_review_photo
-
         generate_review_photo(
-            shop_name="店",
-            out_dir=str(tmp_path),
-            env={"DIANPING_CPA_API_KEY": "sk-legacy"},
+            shop_name="店", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-gen"}
         )
     except AssertionError:
         pass
-    assert seen["url"].startswith("https://api.mangoqwq.com/v1")
-    assert seen["auth"] == "Bearer sk-legacy"
+    assert seen["url"] == imagegen.GEN_BASE_URL + "/images/generations"
 
 
 def test_save_image_uniquifies_same_second_collision(monkeypatch, tmp_path):
@@ -574,3 +545,33 @@ def test_resolve_publish_photos_resolves_default_slot(tmp_path: Path, default_ph
         env={},
     )
     assert resolved == [str(staged)]
+
+
+def test_decode_image_never_fetches_private_or_loopback_media_urls(monkeypatch):
+    """Integration of the URL branch with _fetchable_url (2026-11-09 review):
+    a grok-style loopback or RFC1918 media URL must return None without any
+    network attempt, so the retry loop sees an honest 'no image'."""
+    import urllib.request
+
+    from automation_app_dianping.imagegen import _decode_image, _fetchable_url
+
+    def _boom(*a, **k):
+        raise AssertionError("private media URL must not be fetched")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    assert _decode_image({"data": [{"url": "http://127.0.0.1:18000/v1/media/images/x"}]}) is None
+    assert _decode_image({"data": [{"url": "http://10.5.103.26:18000/x"}]}) is None
+    assert _decode_image({"data": [{"url": "http://192.168.1.4:18000/x"}]}) is None
+    # A domain that merely starts with "10." is a public host: fetchable.
+    assert _fetchable_url("http://10.media.example.com/x") is True
+
+
+def test_fetchable_url_ip_semantics():
+    from automation_app_dianping.imagegen import _fetchable_url
+
+    assert _fetchable_url("https://image.mlgb7.com/images/x.png") is True
+    assert _fetchable_url("http://127.0.0.1:18000/x") is False
+    assert _fetchable_url("http://localhost:18000/x") is False
+    assert _fetchable_url("http://[::1]:18000/x") is False
+    assert _fetchable_url("http://172.16.0.9/x") is False
+    assert _fetchable_url("http://169.254.1.1/x") is False

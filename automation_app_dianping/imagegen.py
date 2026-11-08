@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 GEN_BASE_URL = "https://api.mangoqwq.com/v1"
-CPA_IMAGE_MODEL = "gpt-image-2"  # model constant; name kept from the old gateway era
+GEN_IMAGE_MODEL = "gpt-image-2"
 _GEN_TIMEOUT_S = 150.0
 _GEN_RETRIES = 2
 # Hard ceiling over the whole generation sequence: three full-length attempts
@@ -48,7 +48,7 @@ def _env_value(env: Optional[Dict[str, str]], key: str, default: str = "") -> st
     return str(source.get(key) or default).strip()
 
 
-def _safe_prompt(shop_name: str, dish_hint: str = "") -> str:
+def _safe_prompt(dish_hint: str = "") -> str:
     """Food-photo prompt tuned for diner-plausibility on dianping.
 
     2026-11-09 A/B on the station (辣肉面 + 烤羊肉串, 1024x1024): the old
@@ -59,9 +59,7 @@ def _safe_prompt(shop_name: str, dish_hint: str = "") -> str:
     picks a plausible serving vessel from the dish name on its own. The
     shop name deliberately stays out of the prompt: the model cannot know
     the shop, and naming it only risks rendering it as signage text.
-    ``shop_name`` is kept in the signature for call-site stability.
     """
-    del shop_name
     subject = dish_hint.strip() or "招牌菜品"
     return (
         "%s，刚端上桌热气腾腾，手机随手拍摄的真实用餐照片，小餐馆木餐桌上"
@@ -79,17 +77,28 @@ def _fetchable_url(url: str) -> bool:
     "no image". Skip the fetch outright; those models are only usable
     with ``response_format=b64_json``.
     """
+    import ipaddress
     from urllib.parse import urlparse
 
     try:
         host = (urlparse(str(url)).hostname or "").lower()
     except ValueError:
         return False
-    return host not in {"127.0.0.1", "localhost", "::1"} and not host.startswith("10.")
+    if not host or host == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_private
+    except ValueError:
+        return True  # a domain name, not an IP literal: fetchable
 
 
-def _decode_image(payload: Any) -> Optional[bytes]:
-    """Extract image bytes from the /images/generations JSON response."""
+def _decode_image(payload: Any, url_timeout: Optional[float] = None) -> Optional[bytes]:
+    """Extract image bytes from the /images/generations JSON response.
+
+    ``url_timeout`` bounds the media-URL download; the caller passes the
+    retry budget's remaining time so a slow public-URL channel cannot push
+    the whole generation past ``_GEN_TOTAL_BUDGET_S`` (2MB+ media pulls
+    have measured >200s on this gateway's uplink)."""
     if not isinstance(payload, dict):
         return None
     items = payload.get("data") or []
@@ -107,14 +116,15 @@ def _decode_image(payload: Any) -> Optional[bytes]:
     url = first.get("url")
     if url and _fetchable_url(url):
         try:
-            with urllib.request.urlopen(urllib.request.Request(str(url), headers=_HEADERS), timeout=_GEN_TIMEOUT_S) as resp:
+            timeout = url_timeout if url_timeout is not None else _GEN_TIMEOUT_S
+            with urllib.request.urlopen(urllib.request.Request(str(url), headers=_HEADERS), timeout=timeout) as resp:
                 return resp.read()
         except (OSError, urllib.error.URLError):
             return None
     return None
 
 
-def _decode_image_bytes(raw: Optional[Any]) -> Optional[bytes]:
+def _decode_image_bytes(raw: Optional[Any], url_timeout: Optional[float] = None) -> Optional[bytes]:
     """Salvage image bytes from a raw response body.
 
     The gateway can answer 524 (Cloudflare marks the origin late) *with the
@@ -131,7 +141,7 @@ def _decode_image_bytes(raw: Optional[Any]) -> Optional[bytes]:
             payload = json.loads(raw.decode("utf-8", errors="replace"))
         except (ValueError, TypeError):
             return None
-        return _decode_image(payload)
+        return _decode_image(payload, url_timeout=url_timeout)
     return None
 
 
@@ -167,12 +177,7 @@ def generate_review_photo(
     client errors (4xx) are not retried; the file lands in ``out_dir`` so
     the next resolution sees it as a staged photo.
     """
-    # ``DIANPING_CPA_*`` is the legacy name (the old cpa.mangoqwq.com
-    # gateway); ``DIANPING_GEN_*`` is the current one. Legacy wins so an
-    # existing local .env keeps working after the base-URL switch.
-    key = _env_value(env, "DIANPING_GEN_API_KEY") or _env_value(
-        env, "DIANPING_CPA_API_KEY"
-    )
+    key = _env_value(env, "DIANPING_GEN_API_KEY")
     if not key:
         print(
             "[dianping-photos] image generation skipped: DIANPING_GEN_API_KEY"
@@ -180,21 +185,13 @@ def generate_review_photo(
             flush=True,
         )
         return None
-    base = (
-        _env_value(env, "DIANPING_GEN_BASE_URL")
-        or _env_value(env, "DIANPING_CPA_BASE_URL")
-        or GEN_BASE_URL
-    ).rstrip("/")
-    model = (
-        _env_value(env, "DIANPING_GEN_IMAGE_MODEL")
-        or _env_value(env, "DIANPING_CPA_IMAGE_MODEL")
-        or CPA_IMAGE_MODEL
-    )
+    base = (_env_value(env, "DIANPING_GEN_BASE_URL") or GEN_BASE_URL).rstrip("/")
+    model = _env_value(env, "DIANPING_GEN_IMAGE_MODEL") or GEN_IMAGE_MODEL
     endpoint = "%s/images/generations" % base
     body = json.dumps(
         {
             "model": model,
-            "prompt": _safe_prompt(shop_name, dish_hint),
+            "prompt": _safe_prompt(dish_hint),
             "size": "1024x1024",
             "n": 1,
         }
@@ -235,7 +232,7 @@ def generate_review_photo(
                     raw = exc.read()
                 except Exception:
                     raw = None
-                image_bytes = _decode_image_bytes(raw)
+                image_bytes = _decode_image_bytes(raw, url_timeout=remaining)
                 if image_bytes:
                     return _save_image(image_bytes, out_dir=out_dir, shop_name=shop_name)
                 last_error = exc
@@ -245,7 +242,7 @@ def generate_review_photo(
                     # budget while a publish waits on a photo.
                     break
                 continue
-            image_bytes = _decode_image_bytes(raw)
+            image_bytes = _decode_image_bytes(raw, url_timeout=remaining)
             if not image_bytes:
                 last_error = RuntimeError("generation response carried no image")
                 continue
@@ -268,6 +265,52 @@ def generate_review_photo(
             flush=True,
         )
     return None
+
+
+def dish_hint_from_content(content: str) -> str:
+    """Pull a dish hint for the photo prompt out of the review content.
+
+    The review body names what was eaten, but no upstream field carries a
+    clean dish name (draft ``recommendedDishes`` was never populated). A
+    regex over free prose is too fragile (real drafts yield
+    "肉套餐性价比"/"对肉食爱好者"), so match against a dish-word lexicon:
+    the longest dish term appearing in the text wins. Metaphor mentions
+    (像/如/似 before the term, e.g. "环境像咖啡馆") are dropped -- without
+    the filter a simile attaches the wrong dish to a published review's
+    photo. Best-effort: no usable match keeps the generic signature-dish
+    prompt instead of forcing a wrong subject into the generated image.
+    """
+    _DISH_WORDS = (
+        # noodles & rice
+        "拌面", "汤面", "炒面", "拉面", "牛肉面", "辣肉面", "麻酱面", "葱油拌面",
+        "盖浇饭", "煲仔饭", "叉烧饭", "烧鹅饭", "鳗鱼饭", "石锅拌饭",
+        # shanghai classics
+        "生煎", "小笼", "锅贴", "烧卖", "汤包", "粢饭糕", "粢饭团", "油条",
+        "大馄饨", "小馄饨", "蟹粉小笼", "鲜肉生煎", "春卷", "八宝饭",
+        # meat & hotpot
+        "烤串", "羊肉串", "烤肉", "烧肉", "红烧肉", "东坡肉", "叉烧", "烤鸭",
+        "白斩鸡", "口水鸡", "辣子鸡", "火锅", "麻辣烫", "冒菜", "串串香",
+        # seafood
+        "小龙虾", "香辣蟹", "蟹粉", "三文鱼", "刺身", "寿司",
+        # sweets & drinks
+        "双皮奶", "杨枝甘露", "红豆沙", "绿豆汤", "蛋糕", "泡芙", "蛋挞",
+        "奶茶", "咖啡",
+    )
+    if not content:
+        return ""
+    found = []
+    for word in _DISH_WORDS:
+        idx = content.find(word)
+        if idx < 0:
+            continue
+        # 像/如/似 within the two characters before the term marks a simile
+        # ("像咖啡馆一样安静"), not the dish being reviewed.
+        if any(ch in content[max(0, idx - 2):idx] for ch in "像如似"):
+            continue
+        found.append(word)
+    if not found:
+        return ""
+    return max(found, key=len)
 
 
 def _sanitize_slug(name: str) -> str:

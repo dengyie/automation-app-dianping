@@ -3000,6 +3000,19 @@ class DianpingUia2Session:
         photos = kwargs.get("photos") or []
         if not photos:
             return ActionResult(True, "pick_photos: nothing to attach")
+        # Live 2026-11-09: the album accumulated files from earlier runs and
+        # the picker's positional tile-0 tap attached an image that was in
+        # NONE of the album files -- the picker view at tap time was not the
+        # album content grid. Empty the album (MediaStore rows first, then
+        # files) so the grid can only contain this publish's pushes, and
+        # gate on the row count below: a wrong-dish photo on a published
+        # review is worse than a failed, retryable pick step.
+        cleaned = self._clean_staging_album()
+        print(
+            "[dianping-uia2] pick_photos: staging album cleanup -> %s"
+            % cleaned.message,
+            flush=True,
+        )
         # Stage oldest first so each push is indexed-first at its moment,
         # and photos[0] (newest EXIF) lands as picker photo-tile 0.
         count = len(photos)
@@ -3011,6 +3024,15 @@ class DianpingUia2Session:
                     "pick_photos: gallery prep failed for %s: %s"
                     % (photos[rank], prep.message),
                 )
+        rows = self._staging_album_row_count()
+        if rows != count:
+            self._dump_failure("pick_photos")
+            return ActionResult(
+                False,
+                "pick_photos: staging album holds %s row(s), expected %d -- "
+                "refusing to attach positionally from an unverified album"
+                % ("unknown" if rows is None else rows, count),
+            )
         cleared = self._clear_existing_editor_photos()
         if not cleared.success:
             return cleared
@@ -3033,6 +3055,22 @@ class DianpingUia2Session:
         # Live 2026-10-16: the first tile tap right after the album switch did
         # not stick; give the grid a beat to settle before selecting.
         time.sleep(0.4)
+        # UI-level guard (live 2026-11-09: the header read DianpingAuto while
+        # the grid under it was some other view, and positional tile 0
+        # attached an unrelated image). The content grid must expose the
+        # select checkbox for every staged photo before any tap fires.
+        grid = self._dump_source() or ""
+        if grid.count(_PHOTO_SELECT_RESOURCE_ID) < count:
+            time.sleep(1.0)
+            grid = self._dump_source() or grid
+        if grid.count(_PHOTO_SELECT_RESOURCE_ID) < count:
+            self._dump_failure("pick_photos")
+            return ActionResult(
+                False,
+                "pick_photos: album content grid not ready (%d/%d select "
+                "checkboxes in dump)"
+                % (grid.count(_PHOTO_SELECT_RESOURCE_ID), count),
+            )
         thumb_selector = kwargs.get("thumbnail_selector")
         selected = 0
         for index in range(count):
@@ -3347,6 +3385,55 @@ class DianpingUia2Session:
             adb_push(local, remote)
             return
         raise AttributeError("driver does not support file push")
+
+    def _clean_staging_album(self) -> ActionResult:
+        """Empty the private staging album: MediaStore rows first, then files.
+
+        Picasso reads MediaStore, not the filesystem -- removing only the
+        files would leave ghost tiles the picker can still attach. Rows go
+        first so a re-scan cannot resurrect them; the directory is recreated
+        on demand by ``_prepare_gallery_photo``. Best-effort: a failed
+        cleanup is survivable here because the row-count gate in
+        ``_pick_photos_uia2`` refuses to attach from an unverified album.
+        """
+        device = getattr(self._session, "driver", None)
+        if device is None or not hasattr(device, "shell"):
+            return ActionResult(False, "no adb-capable driver")
+        try:
+            device.shell(
+                [
+                    "content", "delete",
+                    "--uri", "content://media/external/images/media",
+                    "--where", "bucket_display_name='%s'" % self._GALLERY_ALBUM,
+                ]
+            )
+            device.shell(["rm", "-rf", self._GALLERY_DIR])
+        except Exception as exc:
+            return ActionResult(False, "shell failed: %s" % exc)
+        return ActionResult(True, "rows deleted and directory removed")
+
+    def _staging_album_row_count(self) -> Optional[int]:
+        """Number of MediaStore rows in the staging album, None on failure."""
+        device = getattr(self._session, "driver", None)
+        if device is None or not hasattr(device, "shell"):
+            return None
+        try:
+            out = _shell_text(
+                device.shell(
+                    [
+                        "content", "query",
+                        "--uri", "content://media/external/images/media",
+                        "--projection", "_id",
+                        "--where",
+                        "bucket_display_name='%s'" % self._GALLERY_ALBUM,
+                    ]
+                )
+            )
+        except Exception:
+            return None
+        if not out:
+            return 0
+        return sum(1 for line in out.splitlines() if "_id=" in line)
 
     def _prepare_gallery_photo(self, host_path: str, recency_rank: int = 0) -> ActionResult:
         """Stage one host image into the isolated ``DianpingAuto`` album.
@@ -3679,6 +3766,23 @@ class DianpingUia2Session:
                 if isinstance(click_result, ActionResult) and not click_result.success:
                     return click_result
                 attempts += 1
+                info = getattr(element, "info", None)
+                if callable(info):
+                    try:
+                        info = info()
+                    except Exception:
+                        info = None
+                # Identity observability: the 2026-11-09 run attached a tile
+                # from a view that was not the staging album and left nothing
+                # in the log to say what was tapped. Record the rect at least.
+                bounds = ""
+                if isinstance(info, dict):
+                    bounds = str(info.get("bounds") or info.get("visibleBounds") or "")
+                print(
+                    "[dianping-uia2] pick_photos: tapping tile %d at %s"
+                    % (index, bounds or "unknown-bounds"),
+                    flush=True,
+                )
                 deadline = time.time() + 3.0
                 while time.time() < deadline:
                     if self._photo_tile_is_selected(index):

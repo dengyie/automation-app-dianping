@@ -4677,6 +4677,7 @@ def test_uia2_pick_photos_header_guard_after_switch(monkeypatch):
     session._prepare_gallery_photo = (
         lambda host_path, recency_rank=0: ActionResult(True, "staged")
     )
+    session._staging_album_row_count = lambda: 1  # gate passes; widget driver has no shell
     session._switch_to_staging_album = lambda: ActionResult(
         True, "switched picker to DianpingAuto"
     )
@@ -5817,3 +5818,97 @@ def test_dialog_dismiss_covers_leftover_review_modal():
 
     raw = [str(c) for c in default_selectors().dialog_dismiss]
     assert any("暂不查看" in c for c in raw)
+
+
+def test_uia2_dismiss_dialogs_blind_fallback_on_unparseable_dump(monkeypatch):
+    """_present_candidates returns None on an unparseable dump: the loop must
+    fall back to blind taps so a wedged dump channel cannot silently skip a
+    real dialog (2026-11-09 review finding)."""
+    _fast_clock(monkeypatch)
+    kit = _SeqKit(_NavDriver(["not-xml"]))
+    kit.results["tap"] = ActionResult(True, "tapped")
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    out = session._dismiss_dialogs(
+        selector=('uiautomator:new UiSelector().text("残忍拒绝")',), max_attempts=1
+    )
+    assert out.success and out.data == {"dismissed": 1}
+    assert [c[0] for c in kit.calls] == ["tap"]
+
+
+class _ShellCountDriver:
+    """adb device fake: records shell calls, scripts the bucket row query."""
+
+    def __init__(self, rows=0, query_error=False):
+        self.rows = rows
+        self.query_error = query_error
+        self.shell_calls = []
+        self.clicks = []
+
+    def shell(self, cmd):
+        joined = " ".join(str(x) for x in cmd)
+        self.shell_calls.append(joined)
+        if "content" in joined and "query" in joined:
+            if self.query_error:
+                raise RuntimeError("content query failed")
+            if self.rows <= 0:
+                return ""
+            return "".join("Row: %d _id=%d\n" % (i, 100 + i) for i in range(self.rows))
+        return ""
+
+    def click(self, x, y):
+        self.clicks.append((x, y))
+
+
+def test_uia2_pick_photos_cleans_album_and_gates_on_row_count(monkeypatch, tmp_path):
+    """2026-11-09 live: the staging album accumulated files from earlier runs
+    and positional tile-0 attached an image from another picker view. The
+    flow must empty the album (rows then files) and refuse to attach unless
+    the MediaStore row count equals the staged photo count."""
+    _fast_clock(monkeypatch)
+    driver = _ShellCountDriver(rows=3)
+    session = DianpingUia2Session(_SeqKit(driver), captcha_window_seconds=0)
+    monkeypatch.setattr(
+        session, "_prepare_gallery_photo", lambda *a, **k: ActionResult(True, "prep")
+    )
+    result = session._pick_photos_uia2(photos=[str(tmp_path / "a.jpg")])
+    assert "refusing to attach positionally" in result.message
+    deletes = [c for c in driver.shell_calls if "content delete" in c]
+    rms = [c for c in driver.shell_calls if "rm -rf" in c]
+    assert deletes and rms
+    assert driver.shell_calls.index(deletes[0]) < driver.shell_calls.index(rms[0])
+
+    # Exactly one staged row -> the gate passes and the flow moves on.
+    driver_ok = _ShellCountDriver(rows=1)
+    session_ok = DianpingUia2Session(_SeqKit(driver_ok), captcha_window_seconds=0)
+    monkeypatch.setattr(
+        session_ok, "_prepare_gallery_photo", lambda *a, **k: ActionResult(True, "prep")
+    )
+    result_ok = session_ok._pick_photos_uia2(photos=[str(tmp_path / "a.jpg")])
+    assert "refusing to attach positionally" not in result_ok.message
+
+    # An unreadable MediaStore counts as unknown -> refuse as well.
+    driver_bad = _ShellCountDriver(query_error=True)
+    session_bad = DianpingUia2Session(_SeqKit(driver_bad), captcha_window_seconds=0)
+    monkeypatch.setattr(
+        session_bad, "_prepare_gallery_photo", lambda *a, **k: ActionResult(True, "prep")
+    )
+    result_bad = session_bad._pick_photos_uia2(photos=[str(tmp_path / "a.jpg")])
+    assert "refusing to attach positionally" in result_bad.message
+
+
+def test_uia2_clean_staging_album_orders_rows_before_files(monkeypatch):
+    driver = _ShellCountDriver(rows=0)
+    session = DianpingUia2Session(_SeqKit(driver), captcha_window_seconds=0)
+    out = session._clean_staging_album()
+    assert out.success
+    assert len(driver.shell_calls) == 2
+    assert "content delete" in driver.shell_calls[0]
+    assert "rm -rf" in driver.shell_calls[1]
+
+    class _Boom:
+        def shell(self, cmd):
+            raise RuntimeError("usb gone")
+
+    session2 = DianpingUia2Session(_SeqKit(_Boom()), captcha_window_seconds=0)
+    out2 = session2._clean_staging_album()
+    assert not out2.success and "shell failed" in out2.message
