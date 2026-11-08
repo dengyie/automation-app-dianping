@@ -245,3 +245,74 @@ def test_slider_solver_bridge_sends_android_screenshot_context():
     assert request.parameters["challenge_type"] == "slider_captcha"
     assert request.parameters["image_bytes"] == b"png-bytes"
 
+
+
+def test_dish_hint_from_content_lexicon_matches_real_drafts():
+    from automation_app_dianping.live import _dish_hint_from_content
+
+    # Real draft bodies (2026-09/10 corpus): each names its dish plainly.
+    assert _dish_hint_from_content(
+        "味香斋的麻酱面是上海经典的老味道，芝麻酱浓稠香滑，再加一勺辣油。"
+    ) == "麻酱面"
+    assert _dish_hint_from_content(
+        "小杨生煎的鲜肉生煎皮薄底脆，咬开先是一口热汤，肉馅紧实不散。"
+    ) == "鲜肉生煎"
+    assert _dish_hint_from_content(
+        "赤上烧肉酒场的双人烧肉套餐性价比很高，和牛入口即化。"
+    ) == "烧肉"
+    # Longest match wins when several terms appear.
+    assert _dish_hint_from_content(
+        "点了蟹粉小笼和鲜肉生煎，小笼汤汁多。"
+    ) == "蟹粉小笼"
+    # No dish named -> empty (generic signature-dish prompt), never a guess.
+    assert _dish_hint_from_content("这家店环境不错，服务态度也很好，值得再来。") == ""
+    assert _dish_hint_from_content("") == ""
+
+
+def test_build_live_workflow_passes_dish_hint_from_draft(tmp_path: Path, default_photo, monkeypatch):
+    """Draft publish: the resolved photo generation gets a content-grounded prompt."""
+    import automation_app_dianping.photos as photos_mod
+    from automation_app_dianping.live import LIVE_FLAG, build_live_workflow
+
+    content = "味香斋的麻酱面是上海经典的老味道，芝麻酱浓稠香滑，拌开之后根根面上都挂满酱，再加一勺辣油和醋，层次一下子就出来了，配一碟花生和几瓣糖蒜，解腻又提香，环境有烟火气，服务利落，值得专程来吃。" * 2
+    DraftStore(tmp_path).save(
+        DraftRecord(
+            id="live-hint",
+            shop_url="https://www.dianping.com/shop/liveh",
+            shop_name="味香斋",
+            shop_slug="liveh",
+            draft=DraftReview(
+                content=content, ratings=ReviewRatings(5, 4, 4), photos=[], status="edited"
+            ),
+        )
+    )
+
+    captured = {}
+
+    def _fake_resolve(*, slug, shop_name, data_dir, env, dish_hint=""):
+        captured["dish_hint"] = dish_hint
+        from automation_app_dianping.config import default_review_photos
+
+        return default_review_photos()
+
+    monkeypatch.setattr(photos_mod, "resolve_review_photos", _fake_resolve)
+    workflow = build_live_workflow(
+        session_factory=FakeSession,
+        draft_id="live-hint",
+        data_dir=str(tmp_path),
+        env={LIVE_FLAG: "1"},
+    )
+    workflow.run()
+    assert captured["dish_hint"] == "麻酱面"
+
+
+def test_decode_image_skips_loopback_media_urls():
+    """grok-style backends answer with an origin-loopback media URL that only
+    resolves on the gateway host; fetching it here must be skipped outright
+    instead of burning a retry cycle as a vague 'no image'."""
+    from automation_app_dianping.imagegen import _fetchable_url
+
+    assert _fetchable_url("http://127.0.0.1:18000/v1/media/images/img_x") is False
+    assert _fetchable_url("http://localhost:18000/v1/media/images/img_x") is False
+    assert _fetchable_url("http://10.5.103.26:18000/v1/media/images/img_x") is False
+    assert _fetchable_url("https://api.mangoqwq.com/v1/media/images/img_x") is True

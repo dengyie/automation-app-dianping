@@ -59,6 +59,24 @@ def _safe_prompt(shop_name: str, dish_hint: str = "") -> str:
     )
 
 
+def _fetchable_url(url: str) -> bool:
+    """False for gateway answers that only make sense on its own host.
+
+    grok-style backends return a media URL on the origin's loopback
+    (``http://127.0.0.1:18000/...``) — fetching it here fails with
+    connection-refused and used to burn a full retry cycle as a vague
+    "no image". Skip the fetch outright; those models are only usable
+    with ``response_format=b64_json``.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(str(url)).hostname or "").lower()
+    except ValueError:
+        return False
+    return host not in {"127.0.0.1", "localhost", "::1"} and not host.startswith("10.")
+
+
 def _decode_image(payload: Any) -> Optional[bytes]:
     """Extract image bytes from the /images/generations JSON response."""
     if not isinstance(payload, dict):
@@ -76,7 +94,7 @@ def _decode_image(payload: Any) -> Optional[bytes]:
         except (TypeError, ValueError):
             return None
     url = first.get("url")
-    if url:
+    if url and _fetchable_url(url):
         try:
             with urllib.request.urlopen(urllib.request.Request(str(url), headers=_HEADERS), timeout=_GEN_TIMEOUT_S) as resp:
                 return resp.read()

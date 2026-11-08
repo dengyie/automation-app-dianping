@@ -51,6 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--draft-id", default=None)
     live.add_argument("--shop-name", default=None)
     live.add_argument("--content", default=None)
+    live.add_argument(
+        "--dish-hint",
+        default="",
+        help="dish name grounding the generated review photo's prompt "
+        "(publish mode without --draft-id; a draft publish derives it "
+        "from the review content)",
+    )
     live.add_argument("--data-dir", default="data")
     live.add_argument("--city", default="shanghai")
     live.add_argument("--app-id", default="com.dianping.v1")
@@ -136,6 +143,7 @@ def cmd_live(args) -> int:
             enable_slidex=args.enable_slidex,
             shop_name=args.shop_name,
             content=args.content,
+            dish_hint=getattr(args, "dish_hint", "") or "",
             photos=args.photos,
             device=device,
             env=_apply_live_env(args, os.environ),

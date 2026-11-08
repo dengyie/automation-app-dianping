@@ -156,6 +156,41 @@ def build_live_smoke_workflow(
     )
 
 
+def _dish_hint_from_content(content: str) -> str:
+    """Pull a dish hint for the photo prompt out of the review content.
+
+    The review body always names what was eaten, but no upstream field
+    carries a clean dish name (draft ``recommendedDishes`` was never
+    populated). A regex over free prose is too fragile (real drafts yield
+    "肉套餐性价比"/"对肉食爱好者"), so match against a dish-word lexicon:
+    the longest dish term appearing in the text wins. Best-effort — no
+    match keeps the generic signature-dish prompt instead of forcing a
+    wrong subject into the generated photo.
+    """
+    _DISH_WORDS = (
+        # noodles & rice
+        "拌面", "汤面", "炒面", "拉面", "牛肉面", "辣肉面", "麻酱面", "葱油拌面",
+        "盖浇饭", "煲仔饭", "叉烧饭", "烧鹅饭", "鳗鱼饭", "石锅拌饭",
+        # shanghai classics
+        "生煎", "小笼", "锅贴", "烧卖", "汤包", "粢饭糕", "粢饭团", "油条",
+        "大馄饨", "小馄饨", "蟹粉小笼", "鲜肉生煎", "春卷", "八宝饭",
+        # meat & hotpot
+        "烤串", "羊肉串", "烤肉", "烧肉", "红烧肉", "东坡肉", "叉烧", "烤鸭",
+        "白斩鸡", "口水鸡", "辣子鸡", "火锅", "麻辣烫", "冒菜", "串串香",
+        # seafood
+        "小龙虾", "香辣蟹", "蟹粉", "三文鱼", "刺身", "寿司",
+        # sweets & drinks
+        "双皮奶", "杨枝甘露", "红豆沙", "绿豆汤", "蛋糕", "泡芙", "蛋挞",
+        "奶茶", "咖啡",
+    )
+    if not content:
+        return ""
+    found = [word for word in _DISH_WORDS if word in content]
+    if not found:
+        return ""
+    return max(found, key=len)
+
+
 def _resolve_publish_photos(
     photos,
     *,
@@ -163,13 +198,16 @@ def _resolve_publish_photos(
     slug: str = "",
     data_dir: str = "data",
     env: Optional[dict] = None,
+    dish_hint: str = "",
 ) -> list:
     """Choose the publish photo list by the documented priority chain.
 
     An explicitly authored photo list (any non-default path) is kept as-is.
     An empty or default-filled list is resolved: newest staged photo under
-    ``data/photos/<slug>/`` → CPA ``gpt-image-2`` generation → the fixed
+    ``data/photos/<slug>/`` → gateway ``gpt-image-2`` generation → the fixed
     default photo. ``DIANPING_PHOTO_RESOLVE=0`` pins the default photo.
+    ``dish_hint`` grounds the generation prompt in what the review actually
+    eats (falls back to the shop's signature-dish prompt when empty).
     """
     from automation_app_dianping.config import default_review_photos
     from automation_app_dianping.photos import (
@@ -188,6 +226,7 @@ def _resolve_publish_photos(
         shop_name=shop_name,
         data_dir=data_dir,
         env=env,
+        dish_hint=dish_hint,
     )
 
 
@@ -201,6 +240,7 @@ def build_live_workflow(
     enable_slidex: bool = False,
     shop_name: Optional[str] = None,
     content: Optional[str] = None,
+    dish_hint: str = "",
     ratings: Optional[dict] = None,
     photos: Optional[list] = None,
     device: Optional[DianpingDeviceConfig] = None,
@@ -233,6 +273,7 @@ def build_live_workflow(
             slug=draft.shop_slug,
             data_dir=data_dir,
             env=env,
+            dish_hint=_dish_hint_from_content(draft.draft.content),
         )
     else:
         if not shop_name or not content:
@@ -251,6 +292,7 @@ def build_live_workflow(
                 shop_name=shop_name,
                 data_dir=data_dir,
                 env=env,
+                dish_hint=dish_hint or _dish_hint_from_content(content or ""),
             ),
         }
 
@@ -283,6 +325,7 @@ def run_live(
     enable_slidex: bool = False,
     shop_name: Optional[str] = None,
     content: Optional[str] = None,
+    dish_hint: str = "",
     ratings: Optional[dict] = None,
     photos: Optional[list] = None,
     session_factory: Optional[Callable[[], Any]] = None,
@@ -312,6 +355,7 @@ def run_live(
         enable_slidex=enable_slidex,
         shop_name=shop_name,
         content=content,
+        dish_hint=dish_hint,
         ratings=ratings,
         photos=photos,
         device=device,
