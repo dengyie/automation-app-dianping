@@ -203,8 +203,11 @@ def cmd_doctor(args) -> int:
     try:
         import importlib.metadata as _meta
 
-        slidex_entry["installed"] = True
+        # Version first: on a machine without slidex this raises and the
+        # entry must stay installed=False, not a True-with-empty-version
+        # contradiction (caught by CI where the extra is not installed).
         slidex_entry["version"] = _meta.version("slidex")
+        slidex_entry["installed"] = True
     except Exception:
         report["hints"].append("pip install 'slidex' for --enable-slidex risk control")
     if all(

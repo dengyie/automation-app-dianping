@@ -239,9 +239,11 @@ def test_cmd_doctor_warns_when_no_device_attached(monkeypatch, capsys):
     assert any("No adb devices" in hint for hint in report["hints"])
 
 
-def test_cmd_doctor_reports_slidex_vision_channel(monkeypatch, capsys):
-    """slidex risk-control section: installed version + vision-channel state;
-    key values are never echoed (2026-11-09 slidex integration)."""
+def _doctor_with_slidex(monkeypatch, capsys, installed_version):
+    """Run cmd_doctor with importlib.metadata.version patched to simulate a
+    machine with (version string) or without (PackageNotFoundError) slidex,
+    so the assertions hold on CI where the extra is not installed."""
+    import importlib.metadata
     import sys
     import types
 
@@ -261,27 +263,47 @@ def test_cmd_doctor_reports_slidex_vision_channel(monkeypatch, capsys):
         "subprocess.check_output",
         lambda *args, **kwargs: "List of devices attached\n1.2.3.4\tdevice\n",
     )
+    if installed_version is None:
+        def _missing(name):
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.metadata, "version", _missing)
+    else:
+        monkeypatch.setattr(
+            importlib.metadata, "version", lambda name: installed_version
+        )
+    exit_code = cli.cmd_doctor(
+        SimpleNamespace(appium_host="127.0.0.1", appium_port=4723)
+    )
+    return exit_code, json.loads(capsys.readouterr().out)
+
+
+def test_cmd_doctor_reports_slidex_vision_channel(monkeypatch, capsys):
+    """slidex risk-control section (2026-11-09 integration): the entry is a
+    coherent installed+version pair in both machine states, the vision
+    channel follows the env, and key values are never echoed."""
     monkeypatch.delenv("SLIDEX_VISION_ENDPOINT", raising=False)
     monkeypatch.delenv("SLIDEX_VISION_API_KEY", raising=False)
     monkeypatch.delenv("SLIDEX_VISION_MODEL", raising=False)
 
-    exit_code = cli.cmd_doctor(
-        SimpleNamespace(appium_host="127.0.0.1", appium_port=4723)
-    )
-    report = json.loads(capsys.readouterr().out)
+    exit_code, report = _doctor_with_slidex(monkeypatch, capsys, "0.7.0")
     assert exit_code == 0
-    assert report["slidex"]["installed"] is True
-    assert report["slidex"]["version"]
-    assert report["slidex"]["vision_channel"] == "not configured"
+    assert report["slidex"] == {
+        "installed": True,
+        "version": "0.7.0",
+        "vision_channel": "not configured",
+    }
+
+    exit_code, report = _doctor_with_slidex(monkeypatch, capsys, None)
+    assert report["slidex"]["installed"] is False
+    assert report["slidex"]["version"] == ""
+    assert any("slidex" in hint for hint in report["hints"])
 
     # Channel fully configured -> reported, and the key value stays out.
     monkeypatch.setenv("SLIDEX_VISION_ENDPOINT", "https://api.example/v1/chat/completions")
     monkeypatch.setenv("SLIDEX_VISION_API_KEY", "sk-secret-do-not-echo")
     monkeypatch.setenv("SLIDEX_VISION_MODEL", "gemini-3.8-flash")
-    exit_code = cli.cmd_doctor(
-        SimpleNamespace(appium_host="127.0.0.1", appium_port=4723)
-    )
+    exit_code, report = _doctor_with_slidex(monkeypatch, capsys, "0.7.0")
     out = capsys.readouterr().out
-    report = json.loads(out)
     assert report["slidex"]["vision_channel"] == "configured"
     assert "sk-secret-do-not-echo" not in out
