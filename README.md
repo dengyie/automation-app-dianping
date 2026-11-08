@@ -144,12 +144,12 @@ python -m pytest -q
 发布时（`live.py` `build_live_workflow`）对照片列表按以下链路解析，仅当「未显式指定非默认照片」时介入：
 
 1. **最新搜到的图**：`data/photos/<店铺 slug>/` 下按 mtime 最新（`_latest_staged_photos`），存盘的最佳照片天然排最前 → 落进 `photos` 参数。
-2. **生图**：无已存图时调 CPA `gpt-image-2` `POST /images/generations`（`imagegen.py generate_review_photo`）写出一张 PNG 到 `data/photos/<slug>/`。best-effort：无 `DIANPING_CPA_API_KEY` 或请求失败 → 打印跳过、返回 `None`，绝不阻塞发布。
+2. **生图**：无已存图时调 `gpt-image-2` `POST /images/generations`（`imagegen.py generate_review_photo`，默认站 `api.mangoqwq.com/v1`）写出一张 PNG 到 `data/photos/<slug>/`。best-effort：无 `DIANPING_GEN_API_KEY` 或请求失败 → 打印跳过、返回 `None`，绝不阻塞发布。
 3. **兜底默认图**：`default_review_photos()`。
 
 已显式指定的自定义照片（非默认路径）保持不动；`DIANPING_PHOTO_RESOLVE=0` 可固定走默认图。生成图会写进 `data/photos/<slug>/`，故下一次解析自动视作「最新搜到的图」，无需重复生成。此链路只产出**宿主机路径**，登台进 `Pictures/DianpingAuto`、禁止 Camera/「最近项目」的约束完全不变。
 
-生图凭据：CLI 启动时读取仓库根 `.env`（`env.py` `load_dotenv`，gitignore 内），也可直接 `export DIANPING_CPA_API_KEY=sk-...`（已存在的环境变量优先，不被 `.env` 覆盖）；`.env.example` 是字段清单。key 不入库。`data/photos/<slug>/` 与 `fail-*.{xml,png}` 已在 `.gitignore`，店铺照片与失败转储只留本地。
+生图凭据：CLI 启动时读取仓库根 `.env`（`env.py` `load_dotenv`，gitignore 内），也可直接 `export DIANPING_GEN_API_KEY=sk-...`（已存在的环境变量优先，不被 `.env` 覆盖；旧名 `DIANPING_CPA_*` 仍被识别，GEN 名优先）；`.env.example` 是字段清单。key 不入库。`data/photos/<slug>/` 与 `fail-*.{xml,png}` 已在 `.gitignore`，店铺照片与失败转储只留本地。
 
 网关在 Cloudflare 后：请求必须带浏览器 `User-Agent`（`imagegen.py` 内置），否则拿 CF `1010`；`/images/generations` 可能返回 `524`（origin 超时）但 body 里已带图 —— 先解码 body 当成功处理，失败才重试/回落。
 

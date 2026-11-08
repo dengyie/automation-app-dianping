@@ -1,7 +1,7 @@
 """Photo-resolution chain tests.
 
 Covers the documented priority: newest staged photo under
-``data/photos/<slug>/`` -> CPA gpt-image-2 generation -> fixed default photo.
+``data/photos/<slug>/`` -> gateway gpt-image-2 generation -> fixed default photo.
 """
 
 from pathlib import Path
@@ -267,6 +267,14 @@ def test_generate_review_photo_reads_os_environ_when_env_none(monkeypatch, tmp_p
         return _FakeResp()
 
     monkeypatch.setenv("DIANPING_CPA_API_KEY", "sk-from-os-environ")
+    # cli.main loads the repo .env into the real environment; a local working
+    # copy now carries GEN-named keys there (GEN name wins over legacy), so
+    # this os.environ-path test must clear them to stay hermetic.
+    monkeypatch.delenv("DIANPING_GEN_API_KEY", raising=False)
+    monkeypatch.delenv("DIANPING_GEN_BASE_URL", raising=False)
+    monkeypatch.delenv("DIANPING_GEN_IMAGE_MODEL", raising=False)
+    monkeypatch.delenv("DIANPING_CPA_BASE_URL", raising=False)
+    monkeypatch.delenv("DIANPING_CPA_IMAGE_MODEL", raising=False)
     monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
     result = generate_review_photo(shop_name="店", out_dir=str(tmp_path))
     assert seen["auth"] == "Bearer sk-from-os-environ"
@@ -384,6 +392,74 @@ def test_generate_review_photo_non_http_error_log_keeps_type_only(monkeypatch, t
     out = capsys.readouterr().out
     assert "TimeoutError" in out
     assert "None" not in out  # a missing .code must not print "None"
+
+
+def test_generate_review_photo_prefers_gen_name_over_legacy_cpa(monkeypatch, tmp_path):
+    """GEN-named env vars win over the legacy CPA names, and the default
+    base is the api.mangoqwq.com station (2026-11-08 gateway switch)."""
+    import urllib.request
+
+    import automation_app_dianping.imagegen as imagegen
+    from automation_app_dianping.imagegen import generate_review_photo
+
+    seen = {}
+
+    def _fake_urlopen(request, timeout=None, *args, **kwargs):
+        seen["url"] = request.full_url
+        seen["auth"] = request.headers.get("Authorization")
+        raise AssertionError("stop before the network")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    try:
+        generate_review_photo(
+            shop_name="店",
+            out_dir=str(tmp_path),
+            env={
+                "DIANPING_GEN_API_KEY": "sk-new",
+                "DIANPING_CPA_API_KEY": "sk-legacy",
+                "DIANPING_GEN_BASE_URL": "https://gen.example/v1",
+                "DIANPING_CPA_BASE_URL": "https://cpa.example/v1",
+                "DIANPING_GEN_IMAGE_MODEL": "grok-imagine-image",
+            },
+        )
+    except AssertionError:
+        pass
+    assert seen["url"].startswith("https://gen.example/v1")
+    assert seen["auth"] == "Bearer sk-new"
+
+    # Default base/model: no env at all -> the station + gpt-image-2.
+    seen.clear()
+    try:
+        generate_review_photo(shop_name="店", out_dir=str(tmp_path), env={"DIANPING_GEN_API_KEY": "sk-new"})
+    except AssertionError:
+        pass
+    assert seen["url"] == imagegen.GEN_BASE_URL + "/images/generations"
+
+
+def test_generate_review_photo_legacy_cpa_env_still_works(monkeypatch, tmp_path):
+    """An existing local .env with only the legacy names keeps working."""
+    import urllib.request
+
+    seen = {}
+
+    def _fake_urlopen(request, timeout=None, *args, **kwargs):
+        seen["url"] = request.full_url
+        seen["auth"] = request.headers.get("Authorization")
+        raise AssertionError("stop before the network")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    try:
+        from automation_app_dianping.imagegen import generate_review_photo
+
+        generate_review_photo(
+            shop_name="店",
+            out_dir=str(tmp_path),
+            env={"DIANPING_CPA_API_KEY": "sk-legacy"},
+        )
+    except AssertionError:
+        pass
+    assert seen["url"].startswith("https://api.mangoqwq.com/v1")
+    assert seen["auth"] == "Bearer sk-legacy"
 
 
 def test_save_image_uniquifies_same_second_collision(monkeypatch, tmp_path):

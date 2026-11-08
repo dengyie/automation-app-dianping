@@ -2,8 +2,9 @@
 
 1. The newest staged photo under ``data/photos/<slug>/`` — the most recent
    scraped/captured shot wins by mtime (never the fixed default first).
-2. A freshly generated dish photo via CPA ``gpt-image-2`` (best-effort; a
-   missing key or network failure falls through, never blocks a publish).
+2. A freshly generated dish photo via the image gateway's ``gpt-image-2``
+   (best-effort; a missing key or network failure falls through, never
+   blocks a publish).
 3. The fixed default reference photo (``artifacts/gni2_pulled.jpg``).
 
 Generated photos are written into the same ``data/photos/<slug>/`` tree, so
