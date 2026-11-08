@@ -49,13 +49,24 @@ def _env_value(env: Optional[Dict[str, str]], key: str, default: str = "") -> st
 
 
 def _safe_prompt(shop_name: str, dish_hint: str = "") -> str:
-    """Food-photo prompt grounded in the shop so generations look plausible
-    for the actual review and never name a brand/member.
+    """Food-photo prompt tuned for diner-plausibility on dianping.
+
+    2026-11-09 A/B on the station (辣肉面 + 烤羊肉串, 1024x1024): the old
+    "写实美食摄影/浅景深/家常餐馆摆盘" template produced glossy menu-shot
+    images -- pretty but obviously commercial, not what a review photo
+    looks like. The winning template describes a customer's casual phone
+    photo (wooden table, chopsticks, tissue box, window light); the model
+    picks a plausible serving vessel from the dish name on its own. The
+    shop name deliberately stays out of the prompt: the model cannot know
+    the shop, and naming it only risks rendering it as signage text.
+    ``shop_name`` is kept in the signature for call-site stability.
     """
-    subject = dish_hint.strip() or "%s 的招牌菜品" % shop_name
+    del shop_name
+    subject = dish_hint.strip() or "招牌菜品"
     return (
-        "写实美食摄影照片，%s，刚出锅热气腾腾，诱人的油光，家常餐馆摆盘，"
-        "暖色自然光线，浅景深，画面干净，无文字无水印，竖构图" % subject
+        "%s，刚端上桌热气腾腾，手机随手拍摄的真实用餐照片，小餐馆木餐桌上"
+        "配着筷子和纸巾，窗边自然光，色彩自然不夸张，像顾客写点评时拍的"
+        "照片，画面干净无文字无水印，竖构图" % subject
     )
 
 

@@ -130,8 +130,14 @@ def test_safe_prompt_grounds_dish_hint():
     prompt = _safe_prompt("味香斋", "焖蹄面")
     assert "焖蹄面" in prompt
     assert "味香斋" not in prompt
+    # 2026-11-09 A/B winner: casual diner-phone-photo cues, not the glossy
+    # commercial-photo template.
+    assert "手机随手拍" in prompt
+    assert "无文字" in prompt
     generic = _safe_prompt("味香斋")
     assert "招牌菜品" in generic
+    # The model can't know the shop; naming it only risks signage text.
+    assert "味香斋" not in generic
 
 
 def test_decode_image_handles_b64_and_url(monkeypatch):
