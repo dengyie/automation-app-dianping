@@ -12,6 +12,14 @@ from pathlib import Path
 
 import pytest
 
+
+def _slidex_vision_ready():
+    try:
+        from slidex.ocr.llm import LlmVisionConfig  # noqa: F401
+        return hasattr(LlmVisionConfig, "configured")
+    except Exception:
+        return False
+
 from automation_core.drivers import ActionResult, ArtifactHandle, SessionInfo
 
 import automation_app_dianping.session as session_mod
@@ -5944,6 +5952,7 @@ def test_point_select_detection_and_popup_locator():
     assert locate_point_select_popup(bare) is None
 
 
+@pytest.mark.skipif(not _slidex_vision_ready(), reason="slidex vision surface missing")
 def test_riskctl_locate_targets_parses_fenced_json_and_filters_zero_conf(monkeypatch):
     from automation_app_dianping import riskctl
 
