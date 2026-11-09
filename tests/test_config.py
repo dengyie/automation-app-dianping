@@ -160,3 +160,13 @@ def test_photo_selectors_target_photo_tiles_and_two_page_confirm():
     at = selectors.photo_thumbnail_at(3)
     assert "ugc_album_item_select_layout" in at
     assert "instance(3)" in at
+
+
+def test_success_marker_covers_the_celebration_page():
+    """Live 2026-11-10: the post-submit page is a celebration view
+    (发布第 N 条评价) without 评价成功 text -- the marker must cover it
+    or a successful publish reports failure and skips bookkeeping."""
+    from automation_app_dianping.config import default_selectors
+
+    raw = [str(c) for c in default_selectors().success]
+    assert any("发布第" in c for c in raw)

@@ -117,6 +117,9 @@ class DianpingSelectors:
         'uiautomator:new UiSelector().textContains("发布成功")',
         'uiautomator:new UiSelector().textContains("评价成功")',
         'uiautomator:new UiSelector().textContains("审核中")',
+        # Live 2026-11-10: the post-submit page is a celebration view
+        # (发布第 N 条评价) without any 评价成功 text.
+        'uiautomator:new UiSelector().textContains("发布第")',
     )
     dialog_dismiss: SelectorValue = (
         'uiautomator:new UiSelector().text("我知道了")',
