@@ -188,6 +188,34 @@ _BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 # made raw-source substring matching false-positive on the review editor.
 _SLIDER_ATTR_MARKERS = ("captcha", "slider", "geetest", "nocaptcha", "nc_1")
 _SLIDER_TEXT_MARKERS = ("滑块", "拖动滑块", "向右拖动", "安全验证")
+# Live 2026-11-10: dianping's webview also serves an icon point-select
+# challenge (请依次点击下图图标) that blocks the UI the same way a slider does.
+_POINT_SELECT_TEXT_MARKER = "请依次点击"
+_POINT_SELECT_LAYOUT_ID = "titans_main_layout"
+
+
+def page_source_indicates_point_select(source: str) -> bool:
+    """True when the dump carries the icon point-select challenge popup."""
+    return bool(source) and _POINT_SELECT_TEXT_MARKER in source
+
+
+def locate_point_select_popup(source: str) -> Optional[Tuple[int, int, int, int]]:
+    """(x1, y1, x2, y2) of the challenge popup from the dump, else None."""
+    try:
+        root = ET.fromstring(source)
+    except ET.ParseError:
+        return None
+    for node in root.iter("node"):
+        rid = node.get("resource-id") or ""
+        if _POINT_SELECT_LAYOUT_ID not in rid:
+            continue
+        match = _BOUNDS_RE.match(node.get("bounds") or "")
+        if match is None:
+            continue
+        x1, y1, x2, y2 = (int(part) for part in match.groups())
+        if x2 > x1 and y2 > y1:
+            return (x1, y1, x2, y2)
+    return None
 
 
 def page_source_indicates_slider(source: str) -> bool:
@@ -1999,6 +2027,12 @@ class DianpingUia2Session:
             result = ActionResult(False, "%s: %s" % (action_name, exc))
         if result.success and action_name in self._SLIDER_GUARDED_ACTIONS:
             result = self._guard_slider(action_name, result, kwargs)
+        if (
+            result.success
+            and action_name in self._SLIDER_GUARDED_ACTIONS
+            and page_source_indicates_point_select(self._hierarchy_source())
+        ):
+            result = self._guard_point_select(action_name, result, kwargs)
         print(
             "[dianping-uia2] << %s: %s (%.1fs)"
             % (action_name, "ok" if result.success else "FAIL", time.time() - started),
@@ -2061,6 +2095,111 @@ class DianpingUia2Session:
         ):
             result = self._retry_after_manual_window(action_name, kwargs, result)
         return result
+
+    def _guard_point_select(
+        self, action_name: str, result: ActionResult, kwargs: Dict[str, Any]
+    ) -> ActionResult:
+        """Detect the icon point-select challenge and solve it via slidex vision.
+
+        Mirrors the slider guard: the popup absorbs the action that triggered
+        it, so the action is retried once after the challenge is cleared. The
+        re-entrancy flag keeps the retry itself out of the guard.
+        """
+        if self._slider_guard_active:
+            return result
+        popup = locate_point_select_popup(self._hierarchy_source())
+        if popup is None:
+            return result
+        self._slider_guard_active = True
+        try:
+            solve = self._attempt_point_select_solve(popup)
+            if not solve.success:
+                return ActionResult(
+                    False,
+                    "point-select challenge detected during %s; %s"
+                    % (action_name, solve.message),
+                )
+            retry = self.execute_action(action_name, **kwargs)
+            if not retry.success:
+                return ActionResult(
+                    False,
+                    "point-select solved but %s retry failed: %s"
+                    % (action_name, retry.message),
+                )
+            return ActionResult(True, "%s (point-select solved; action retried)" % action_name)
+        finally:
+            self._slider_guard_active = False
+
+    def _attempt_point_select_solve(self, popup: Tuple[int, int, int, int]) -> ActionResult:
+        """Click the challenge's icons in the hint order via slidex vision.
+
+        Click cadence is humanized (uneven 0.4-0.9s gaps, +-3px jitter) --
+        the 2026-11-10 live probe registered four uniform clicks and the
+        verifier answered 请求异常 with a refusal.
+        """
+        import random
+
+        from PIL import Image
+
+        from automation_app_dianping import riskctl
+
+        channel = riskctl.vision_channel_from_env()
+        if channel is None:
+            return ActionResult(
+                False,
+                "vision channel not configured (SLIDEX_VISION_*) for the "
+                "point-select challenge",
+            )
+        endpoint, api_key, model, timeout = channel
+        driver = getattr(self._session, "driver", None)
+        capture = getattr(driver, "screenshot", None) if driver is not None else None
+        if not callable(capture):
+            return ActionResult(False, "driver cannot capture screenshots")
+        try:
+            image = capture()
+            if not isinstance(image, (bytes, bytearray)):
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                image = buffer.getvalue()
+            x1, y1, x2, y2 = popup
+            popup_png = Image.open(io.BytesIO(bytes(image))).crop((x1, y1, x2, y2))
+            buffer = io.BytesIO()
+            popup_png.save(buffer, format="PNG")
+        except Exception as exc:
+            return ActionResult(False, "popup capture failed: %s" % exc)
+        targets = riskctl.locate_point_select_targets(
+            buffer.getvalue(),
+            endpoint=endpoint,
+            api_key=api_key,
+            model=model,
+            timeout_s=timeout,
+        )
+        if not targets:
+            return ActionResult(
+                False, "vision channel returned no usable icon targets"
+            )
+        click = getattr(driver, "click", None)
+        if not callable(click):
+            return ActionResult(False, "driver does not support coordinate click")
+        popup_w, popup_h = x2 - x1, y2 - y1
+        for label, nx, ny, _conf in targets:
+            jitter_x = random.randint(-3, 3)
+            jitter_y = random.randint(-3, 3)
+            dx = x1 + max(1, min(popup_w - 2, int(round(nx * popup_w)) + jitter_x))
+            dy = y1 + max(1, min(popup_h - 2, int(round(ny * popup_h)) + jitter_y))
+            try:
+                click(dx, dy)
+            except Exception as exc:
+                return ActionResult(False, "click %s failed: %s" % (label, exc))
+            print(
+                "[dianping-uia2] point-select: clicked %s at (%d, %d)" % (label, dx, dy),
+                flush=True,
+            )
+            time.sleep(random.uniform(0.4, 0.9))
+        time.sleep(2.0)
+        if page_source_indicates_point_select(self._hierarchy_source()):
+            return ActionResult(False, "challenge popup still present after clicks")
+        return ActionResult(True, "clicked %d icon(s) in hint order" % len(targets))
 
     def _guard_slider(self, action_name: str, result: ActionResult, kwargs: Dict[str, Any]) -> ActionResult:
         """Detect a risk-control slider that appeared during an action.

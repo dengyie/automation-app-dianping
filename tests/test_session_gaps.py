@@ -7,6 +7,7 @@ keycode/launch/confirm_search alternatives, module-level parse helpers
 hide-keyboard / rate / element-bounds / dismiss-dialogs tails.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -5922,3 +5923,202 @@ def test_dialog_dismiss_covers_app_update_dialog():
 
     raw = [str(c) for c in default_selectors().dialog_dismiss]
     assert any("update_dialog_close" in c for c in raw)
+
+
+def test_point_select_detection_and_popup_locator():
+    from automation_app_dianping.session import (
+        locate_point_select_popup,
+        page_source_indicates_point_select,
+    )
+
+    assert not page_source_indicates_point_select("<hierarchy/>")
+    source = _nav_source(
+        '<node text="请依次点击下图图标" bounds="[121,715][959,785]"/>',
+        '<node resource-id="com.dianping.v1:id/titans_main_layout" '
+        'bounds="[141,761][939,1661]"/>',
+    )
+    assert page_source_indicates_point_select(source)
+    assert locate_point_select_popup(source) == (141, 761, 939, 1661)
+    # A dump without the layout id yields no popup box.
+    bare = _nav_source('<node text="请依次点击下图图标" bounds="[0,0][10,10]"/>')
+    assert locate_point_select_popup(bare) is None
+
+
+def test_riskctl_locate_targets_parses_fenced_json_and_filters_zero_conf(monkeypatch):
+    from automation_app_dianping import riskctl
+
+    monkeypatch.setenv("SLIDEX_VISION_ENDPOINT", "https://api.example/v1/chat/completions")
+    monkeypatch.setenv("SLIDEX_VISION_API_KEY", "sk-test")
+    monkeypatch.setenv("SLIDEX_VISION_MODEL", "gemini-3.8-flash")
+
+    from PIL import Image
+    import io as _io
+
+    buf = _io.BytesIO()
+    Image.new("RGB", (300, 200), "white").save(buf, format="PNG")
+
+    captured = {}
+
+    class _F:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *e):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '```json\n{"targets":['
+                                '{"char":"拼图块","x":0.2,"y":0.3,"confidence":0.95},'
+                                '{"char":"盾牌","x":0.8,"y":0.4,"confidence":0.95},'
+                                '{"char":"云朵","x":0.5,"y":0.3,"confidence":0}]}'
+                                "\n```"
+                            }
+                        }
+                    ]
+                }
+            ).encode()
+
+    import urllib.request
+
+    def _fake(request, timeout=None, *a, **k):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _F()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake)
+
+    targets = riskctl.locate_point_select_targets(
+        buf.getvalue(),
+        endpoint="https://api.example/v1/chat/completions",
+        api_key="sk-test",
+        model="gemini-3.8-flash",
+    )
+    assert [t[0] for t in targets] == ["拼图块", "盾牌"]  # zero-conf filtered
+    assert targets[0][1:] == (0.2, 0.3, 0.95)
+    # Prompt discipline: no captcha wording anywhere in the request.
+    prompt_text = captured["payload"]["messages"][0]["content"][0]["text"]
+    for banned in ("验证码", "captcha", "滑块", "bypass"):
+        assert banned not in prompt_text, banned
+
+
+def test_riskctl_returns_none_on_unparseable_image(monkeypatch):
+    from automation_app_dianping import riskctl
+
+    monkeypatch.setenv("SLIDEX_VISION_ENDPOINT", "https://api.example/v1/chat/completions")
+    monkeypatch.setenv("SLIDEX_VISION_API_KEY", "sk-test")
+    monkeypatch.setenv("SLIDEX_VISION_MODEL", "gemini-3.8-flash")
+    assert (
+        riskctl.locate_point_select_targets(
+            b"not-a-png",
+            endpoint="https://api.example/v1/chat/completions",
+            api_key="sk-test",
+            model="gemini-3.8-flash",
+        )
+        is None
+    )
+
+
+def test_uia2_point_select_guard_clicks_in_hint_order(monkeypatch):
+    """The guard solves the icon challenge via the vision channel and retries
+    the action (2026-11-10 live: four uniform clicks registered but the
+    verifier refused without the ordered-solve path)."""
+    _fast_clock(monkeypatch)
+
+    class _PointDriver(_NavDriver):
+        def __init__(self):
+            super().__init__(["<hierarchy/>"])
+            self.captcha_clicks = []
+            self.shot_taken = 0
+
+        def dump_hierarchy(self):
+            # Once both icons are clicked the challenge clears: subsequent
+            # dumps no longer carry the popup (the guard's post-click check).
+            if len(self.captcha_clicks) >= 2:
+                return "<hierarchy/>"
+            return super().dump_hierarchy()
+
+        def screenshot(self):
+            import io as _io
+
+            from PIL import Image as _Image
+
+            self.shot_taken += 1
+            buf = _io.BytesIO()
+            _Image.new("RGB", (1080, 2400), "white").save(buf, format="PNG")
+            return buf.getvalue()
+
+        def click(self, x, y):
+            self.captcha_clicks.append((x, y))
+
+    driver = _PointDriver()
+    kit = _SeqKit(driver)
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+
+    source = _nav_source(
+        '<node text="请依次点击下图图标" bounds="[121,715][959,785]"/>',
+        '<node resource-id="com.dianping.v1:id/titans_main_layout" '
+        'bounds="[141,761][939,1661]"/>',
+    )
+    driver.dumps = [source]  # sticky: guard + retry dumps all see the popup... 
+
+    from automation_app_dianping import riskctl
+
+    monkeypatch.setattr(
+        riskctl,
+        "vision_channel_from_env",
+        lambda: ("https://api.example/v1/chat/completions", "sk-test", "gemini-3.8-flash", 30.0),
+    )
+    monkeypatch.setattr(
+        riskctl,
+        "locate_point_select_targets",
+        lambda popup_png, **kw: [
+            ("拼图块", 0.2, 0.3, 0.95),
+            ("盾牌", 0.8, 0.4, 0.95),
+        ],
+    )
+
+    # The action under guard: a tap that "succeeded" while the popup was up.
+    result = session._guard_point_select("tap", ActionResult(True, "tap"), {"selector": "x"})
+    assert result.success, result.message
+    assert "point-select solved" in result.message
+    assert len(driver.captcha_clicks) == 2
+    # popup origin (141,761) + normalized coords within (798, 900)
+    x1, y1 = driver.captcha_clicks[0]
+    assert 141 + int(0.2 * 798) - 4 <= x1 <= 141 + int(0.2 * 798) + 4
+    assert 761 + int(0.3 * 900) - 4 <= y1 <= 761 + int(0.3 * 900) + 4
+
+
+def test_uia2_point_select_guard_fails_without_vision_channel(monkeypatch):
+    _fast_clock(monkeypatch)
+
+    class _PointDriver(_NavDriver):
+        def __init__(self):
+            super().__init__(["<hierarchy/>"])
+
+        def screenshot(self):
+            import io as _io
+
+            from PIL import Image as _Image
+
+            buf = _io.BytesIO()
+            _Image.new("RGB", (1080, 2400), "white").save(buf, format="PNG")
+            return buf.getvalue()
+
+    driver = _PointDriver()
+    session = DianpingUia2Session(_SeqKit(driver), captcha_window_seconds=0)
+    source = _nav_source(
+        '<node text="请依次点击下图图标" bounds="[121,715][959,785]"/>',
+        '<node resource-id="com.dianping.v1:id/titans_main_layout" '
+        'bounds="[141,761][939,1661]"/>',
+    )
+    driver.dumps = [source]
+    from automation_app_dianping import riskctl
+
+    monkeypatch.setattr(riskctl, "vision_channel_from_env", lambda: None)
+    result = session._guard_point_select("tap", ActionResult(True, "tap"), {})
+    assert not result.success
+    assert "vision channel not configured" in result.message
