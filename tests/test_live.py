@@ -1,3 +1,5 @@
+import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -176,8 +178,13 @@ def test_run_live_no_submit_stops_before_submit(tmp_path: Path):
     assert s.artifacts[-1] == ("screenshot", "publish-no-submit.png")
 
 
-def _slider_solver_with_result(result):
-    """Build the live slider bridge around a fake capability executor."""
+def _slider_solver_with_result(result, eager=True):
+    """Build the live slider bridge around a fake capability executor.
+
+    ``eager=False`` skips the fixture's own dummy-bytes solve probe: the
+    vision fallback needs a real image and configured env, which a no-gap
+    result cannot provide there.
+    """
 
     class FakeExecutor:
         def __init__(self):
@@ -203,6 +210,10 @@ def _slider_solver_with_result(result):
     import asyncio
 
     solve = _build_slider_solver(composition)
+    if not eager:
+        # Lazy: the vision fallback needs a real image + configured env; the
+        # no-gap result cannot survive the fixture's dummy-bytes probe.
+        return composition, solve, None
     return composition, solve, asyncio.run(solve(b"png-bytes"))
 
 
@@ -350,3 +361,150 @@ def test_build_live_workflow_prefers_explicit_dish_hint(tmp_path, default_photo,
     )
     workflow.run()
     assert captured["dish_hint"] == "红烧肉"
+
+
+def test_vision_gap_left_edge_parses_fenced_json(monkeypatch):
+    """The vision fallback: fenced model output parses, normalized x maps to
+    absolute screenshot pixels via the heuristic crop, and the prompt never
+    names captchas (safety-refusal risk, live 2026-11-10)."""
+    import io
+    import json
+    import urllib.request
+
+    from PIL import Image
+
+    from automation_app_dianping.live import _vision_gap_left_edge
+
+    monkeypatch.setenv("SLIDEX_VISION_ENDPOINT", "https://api.example/v1/chat/completions")
+    monkeypatch.setenv("SLIDEX_VISION_API_KEY", "sk-test")
+    monkeypatch.setenv("SLIDEX_VISION_MODEL", "gemini-3.8-flash")
+
+    shot = Image.new("RGB", (1080, 2400), "white")
+    buf = io.BytesIO()
+    shot.save(buf, format="PNG")
+    image_bytes = buf.getvalue()
+
+    captured = {}
+
+    def _fake_urlopen(request, timeout=None, *args, **kwargs):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        body = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '```json\n{"targets":[{"char":"拼图形状",'
+                        '"x":0.70,"y":0.35,"confidence":0.9}]}\n```'
+                    }
+                }
+            ]
+        }
+        return _UrlopenJson(body)
+
+    class _UrlopenJson:
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(self._body).encode("utf-8")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    gap = _vision_gap_left_edge(image_bytes)
+    # crop = (86, 528, 993, 1728); crop_w = 907; 86 + round(0.70*907) = 721
+    assert gap == 721
+    prompt_text = captured["payload"]["messages"][0]["content"][0]["text"]
+    for banned in ("验证码", "captcha", "slider", "滑块"):
+        assert banned not in prompt_text, banned
+
+    # Zero-confidence answer -> honest miss.
+    def _zero_urlopen(request, timeout=None, *args, **kwargs):
+        body = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"targets":[{"char":"拼图形状","x":0.0,'
+                        '"y":0.0,"confidence":0}]}'
+                    }
+                }
+            ]
+        }
+        return _UrlopenJson(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _zero_urlopen)
+    assert _vision_gap_left_edge(image_bytes) is None
+
+
+def test_vision_gap_left_edge_none_when_channel_unconfigured(monkeypatch):
+    from automation_app_dianping.live import _vision_gap_left_edge
+
+    monkeypatch.delenv("SLIDEX_VISION_ENDPOINT", raising=False)
+    monkeypatch.delenv("SLIDEX_VISION_API_KEY", raising=False)
+    monkeypatch.delenv("SLIDEX_VISION_MODEL", raising=False)
+    assert _vision_gap_left_edge(b"\x89PNG\r\n\x1a\n") is None
+
+
+def test_slider_bridge_falls_back_to_vision_when_image_path_misses(monkeypatch):
+    """slidex image path succeeds but returns no gap (soft-edged sprite) ->
+    the bridge calls the vision channel and still returns a gap_x."""
+    from automation_core.capabilities import CapabilityResult
+
+    composition, solve, _ = _slider_solver_with_result(
+        {
+            "success": True,
+            "data": {"metadata": {}},  # no gap_x / gap_offset_px
+        },
+        eager=False,
+    )
+
+    monkeypatch.setenv("SLIDEX_VISION_ENDPOINT", "https://api.example/v1/chat/completions")
+    monkeypatch.setenv("SLIDEX_VISION_API_KEY", "sk-test")
+    monkeypatch.setenv("SLIDEX_VISION_MODEL", "gemini-3.8-flash")
+
+    import urllib.request
+
+    class _UrlopenJson:
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(self._body).encode("utf-8")
+
+    def _fake_urlopen(request, timeout=None, *args, **kwargs):
+        body = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"targets":[{"char":"拼图形状",'
+                        '"x":0.50,"y":0.35,"confidence":0.9}]}'
+                    }
+                }
+            ]
+        }
+        return _UrlopenJson(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    import asyncio
+    import io
+
+    from PIL import Image
+
+    shot = Image.new("RGB", (1080, 2400), "white")
+    buf = io.BytesIO()
+    shot.save(buf, format="PNG")
+
+    solution = asyncio.run(solve(buf.getvalue()))
+    # crop = (86, 528, 993, 1728); 86 + round(0.50*907) = 540
+    assert solution == {"gap_x": 540}

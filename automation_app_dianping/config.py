@@ -129,6 +129,9 @@ class DianpingSelectors:
         # launch — 暂不查看 discards the prompt without jumping into the
         # editor; the home search bar is unreachable while it is up.
         'uiautomator:new UiSelector().text("暂不查看")',
+        # Live 2026-11-10: the app-update dialog (新版本抢先体验 v11.75.1)
+        # closes via an icon keyed by content-desc, not a text button.
+        'uiautomator:new UiSelector().description("update_dialog_close")',
         "~关闭",
     )
     # 2026-09 editor geometry (OnePlus 7T, 1080px width). The overall row

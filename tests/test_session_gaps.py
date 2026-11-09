@@ -5912,3 +5912,13 @@ def test_uia2_clean_staging_album_orders_rows_before_files(monkeypatch):
     session2 = DianpingUia2Session(_SeqKit(_Boom()), captcha_window_seconds=0)
     out2 = session2._clean_staging_album()
     assert not out2.success and "shell failed" in out2.message
+
+
+def test_dialog_dismiss_covers_app_update_dialog():
+    """Live 2026-11-10: the app-update dialog (新版本抢先体验 v11.75.1)
+    closes via the update_dialog_close content-desc icon, not a text
+    button -- without it a fresh launch blocks the home search bar."""
+    from automation_app_dianping.config import default_selectors
+
+    raw = [str(c) for c in default_selectors().dialog_dismiss]
+    assert any("update_dialog_close" in c for c in raw)

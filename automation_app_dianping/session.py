@@ -177,6 +177,10 @@ def create_appium_driver(device: DianpingDeviceConfig):
 
 
 _SLIDER_HANDLE_HINTS = ("滑块", "slider", "拖动", "handle")
+# Live 2026-11-10: dianping's webview jigsaw renders its handle as
+# puzzleSliderMoveingBar/puzzleSliderBox with no text or content-desc, so the
+# text/desc hints above never match. Structural id hints cover that channel.
+_SLIDER_HANDLE_ID_HINTS = ("slider", "puzzle", "captcha")
 _BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 
 # Latin markers only count inside structural attributes: H5 pages carry
@@ -217,7 +221,11 @@ def locate_slider_handle(source: str) -> Optional[Tuple[int, int]]:
     for node in root.iter("node"):
         text = (node.get("text") or "").strip().lower()
         desc = (node.get("content-desc") or "").strip().lower()
-        if not any(hint in text or hint in desc for hint in _SLIDER_HANDLE_HINTS):
+        rid = (node.get("resource-id") or "").strip().lower()
+        if not any(
+            hint in text or hint in desc or hint in rid
+            for hint in _SLIDER_HANDLE_HINTS
+        ) and not any(hint in rid for hint in _SLIDER_HANDLE_ID_HINTS):
             continue
         match = _BOUNDS_RE.match(node.get("bounds") or "")
         if match is None:

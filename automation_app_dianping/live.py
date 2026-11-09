@@ -61,6 +61,100 @@ def resolve_session_factory(
     return build_session_factory(device=device, env=env, slider_solver=slider_solver)
 
 
+def _vision_gap_left_edge(image_bytes: bytes) -> Optional[int]:
+    """Locate the puzzle sprite's left edge via the slidex vision channel.
+
+    slidex's pure-image detectors miss dianping's soft-edged, semi-transparent
+    jigsaw sprite (live 2026-11-10: two puzzles, zero detections) while the
+    multimodal model reads it fine. The prompt is deliberately neutral about
+    what the sprite is FOR -- naming captchas trips safety refusals (the
+    model answers with a policy apology instead of coordinates). Markdown
+    fences are stripped before parsing. Returns the sprite's left edge in
+    full-screenshot pixels, or None when the channel is unconfigured/misses.
+    """
+    try:
+        from slidex.ocr.llm import LlmVisionConfig, parse_llm_targets
+    except ImportError:
+        return None
+    config = LlmVisionConfig.from_env()
+    if not getattr(config, "configured", False):
+        return None
+    try:
+        import base64
+        import json as _json
+        import re as _re
+        import urllib.request
+
+        from PIL import Image
+        import io
+
+        shot = Image.open(io.BytesIO(image_bytes))
+        width, height = shot.size
+        # The puzzle renders centered on dianping's webview; crop the central
+        # band so the model sees the sprite large instead of a busy full shot.
+        cx0, cy0, cx1, cy1 = (
+            int(width * 0.08), int(height * 0.22), int(width * 0.92), int(height * 0.72),
+        )
+        crop = shot.crop((cx0, cy0, cx1, cy1))
+        buffer = io.BytesIO()
+        crop.save(buffer, format="PNG")
+        prompt = (
+            "这是一张照片。图中有一个深色的拼图形状（半透明深色阴影块）。"
+            "请找出这个深色拼图形状的左边缘中点。严格只输出如下 JSON：\n"
+            '{"targets":[{"char":"拼图形状","x":0.70,"y":0.35,"confidence":0.9}]}\n'
+            "x、y 是该左边缘中点在整张图中的归一化坐标（0 到 1，左上为原点）。"
+        )
+        payload = {
+            "model": config.model,
+            "temperature": 0,
+            "max_tokens": config.max_tokens,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,"
+                                + base64.b64encode(buffer.getvalue()).decode()
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+        request = urllib.request.Request(
+            config.endpoint,
+            data=_json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": config.user_agent,
+                "Accept": "application/json",
+                **(
+                    {"Authorization": "Bearer %s" % config.api_key}
+                    if config.api_key
+                    else {}
+                ),
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=config.timeout_s) as resp:
+            body = _json.load(resp)
+        raw = str(
+            (body.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        )
+        # The model wraps the JSON in markdown fences; slidex's parser wants
+        # the bare object.
+        raw = _re.sub(r"```[a-zA-Z]*|```", "", raw).strip()
+        targets = parse_llm_targets(raw)
+        if not targets or targets[0][3] <= 0:
+            return None
+        return int(round(targets[0][1] * (cx1 - cx0)) + cx0)
+    except Exception:
+        return None
+
+
 def _build_slider_solver(composition) -> Callable[[Any], Any]:
     """Build the session-level slider solver on top of the visual capability.
 
@@ -117,9 +211,13 @@ def _build_slider_solver(composition) -> Callable[[Any], Any]:
             return {"gap_offset_px": int(offset)}
         gap_x = _first("gap_x", "distance_px")
         if gap_x is None:
-            raise RuntimeError(
-                "slidex slider solve returned no gap_x/gap_offset_px"
-            )
+            # slidex's pure-image path missed (soft-edged sprite); the vision
+            # channel is the second slidex leg before giving up.
+            gap_x = _vision_gap_left_edge(image_bytes)
+            if gap_x is None:
+                raise RuntimeError(
+                    "slidex slider solve returned no gap_x/gap_offset_px"
+                )
         return {"gap_x": int(gap_x)}
 
     return solve
