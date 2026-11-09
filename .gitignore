@@ -31,3 +31,6 @@ package-lock.json
 build/
 dist/
 artifacts/
+
+# slider/captcha debug captures
+data/_*
