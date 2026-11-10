@@ -151,9 +151,18 @@ python -m pytest -q
 
 产物: artifacts/dianping-live/ ; 选择器: automation_app_dianping/config.py
 
-风控滑块：`--enable-slidex` 为 Appium 与 uia2（生产驱动）两条会话路径都挂上 slidex 纯图像求解器。滑块出现时守卫自动完成「截图→求解→拖动→重试动作」；检测以页面结构为准（`滑块`/`nc_1_wrapper` 等标记），无滑块不触发。未装 slidex 或求解失败时动作确定性失败并保留截图/page_source 证据。
+风控滑块：`--enable-slidex` 为 Appium 与 uia2（生产驱动）两条会话路径都挂上 slidex 纯图像求解器。滑块出现时守卫自动完成「截图→求解→拖动→**校验挑战确已消失**→重试动作」；检测以页面结构为准（`滑块`/`nc_1_wrapper` 等标记），无滑块不触发。拖动手势本身会报成功（拼图可能拒绝拼块），所以拖动后必须重新 dump 确认挑战消失，否则动作确定性失败——否则重试动作会落在仍遮蔽界面的浮层上（而浮层上的点击同样报成功），发布会在被挡住的页面上继续。未装 slidex、求解失败或挑战仍在时动作确定性失败并保留截图/page_source 证据。
 
 最小真机建议：先 smoke，再带图 publish。默认图是 `artifacts/gni2_pulled.jpg`（`default_review_photos()`），空 / 省略 `photos` 仍走这张，登台到 `Pictures/DianpingAuto` 后再勾选；**唯一跳过带图的开关是 `parameters.allow_photos=false`**。禁止点 Camera / 「最近项目」（格 0 是私图）。失败会自动 dump screenshot/page_source 到产物目录。
+
+### 发布闸门（两种发布路径同规则）
+
+`live --mode publish` 的两条入口——`--draft-id` 与 `--shop-name + --content`——走同一套闸门：
+
+- **内容质量**：正文 ≥ 100 个中文字；分项评分不得全 5（全 5 被判低质刷分，见 `validate_review_content`）。直发路径默认 `口味5/环境5/服务4`——总体星级仍是 5 星（编辑器按分项均值取整），但分项不是全 5。
+- **当日配额**：默认每天最多 2 条（`DianpingPublishPolicy.max_per_day`）。
+- **发布间隔**：默认两次发布至少间隔 60 分钟（`min_interval_minutes`）。
+- **记账**：两条路径在真正发布成功后都会写 `data/state.json`（`--mark-published`），否则配额与间隔闸门看不到实际发生的发布。`--no-submit` 排练不发布，因此不记账、不消耗配额。
 
 ### 图片来源优先级（`photos.py` `resolve_review_photos`）
 

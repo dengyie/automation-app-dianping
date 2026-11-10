@@ -1274,31 +1274,6 @@ def test_uia2_slider_guard_solves_and_retries(monkeypatch):
             self.swipes.append((x1, y1, x2, y2))
             self.source = clean
 
-def test_uia2_slider_guard_solves_and_retries(monkeypatch):
-    from automation_app_dianping.session import page_source_indicates_slider
-
-    _fast_clock(monkeypatch)
-    handle = (
-        '<hierarchy><node bounds="[40,800][120,880]" content-desc="滑块" '
-        'class="android.widget.ImageView"/></hierarchy>'
-    )
-    clean = "<hierarchy><node text='点评'/></hierarchy>"
-
-    class SwipeDevice:
-        def __init__(self):
-            self.source = handle
-            self.swipes = []
-
-        def dump_hierarchy(self):
-            return self.source
-
-        def screenshot(self):
-            return b"png"
-
-        def swipe(self, x1, y1, x2, y2, duration):
-            self.swipes.append((x1, y1, x2, y2))
-            self.source = clean
-
     device = SwipeDevice()
     kit = _SeqKit(device)
     # kit tap fails while the slider page is up, succeeds once solved+retried
@@ -1323,6 +1298,102 @@ def test_uia2_slider_guard_solves_and_retries(monkeypatch):
 
     assert page_source_indicates_slider(handle)
     assert not page_source_indicates_slider(clean)
+
+
+def test_uia2_slider_guard_fails_when_challenge_persists(monkeypatch):
+    """The swipe lands but the jigsaw refuses the piece: the guard must fail
+    instead of reporting "slider solved; action retried" on a blocked page
+    (the retry tap would land on the overlay and also report success)."""
+    _fast_clock(monkeypatch)
+    handle = (
+        '<hierarchy><node bounds="[40,800][120,880]" content-desc="滑块" '
+        'class="android.widget.ImageView"/></hierarchy>'
+    )
+
+    class StickyDevice:
+        def __init__(self):
+            self.source = handle
+            self.swipes = []
+
+        def dump_hierarchy(self):
+            return self.source
+
+        def screenshot(self):
+            return b"png"
+
+        def swipe(self, x1, y1, x2, y2, duration):
+            self.swipes.append((x1, y1, x2, y2))
+            # the challenge stays up
+
+    device = StickyDevice()
+    kit = _SeqKit(device)
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    session.slider_solver = lambda image: {"gap_offset_px": 280}
+    result = session._guard_slider("tap", ActionResult(True, "tap"), {})
+    assert not result.success
+    assert "still present after the swipe" in result.message
+    # the swipe was attempted, and the action was NOT retried on the overlay
+    assert device.swipes == [(80, 840, 360, 840)]
+    assert not [call for call in kit.calls if call[0] == "tap"]
+
+
+def test_appium_slider_guard_fails_when_challenge_persists(monkeypatch, tmp_path):
+    """Same contract on the Appium session: a persistent challenge is a
+    failure, not a solved slider."""
+    import base64 as b64
+
+    class StickyDriver:
+        def __init__(self):
+            self.source = (
+                "<hierarchy><node resource-id='com.x:id/slider' text='slider handle' "
+                "bounds='[40,1000][300,1040]'/></hierarchy>"
+            )
+            self.swipes = []
+
+        @property
+        def page_source(self):
+            return self.source
+
+        def swipe(self, *args):
+            self.swipes.append(args)
+
+        def get_screenshot_as_base64(self):
+            return b64.b64encode(b"png")
+
+    driver = StickyDriver()
+    session = DianpingAppiumSession(
+        driver, artifact_root=tmp_path, slider_solver=lambda image: 150
+    )
+    result = session._guard_slider(
+        "tap", ActionResult(True, "tap"), {"selector": "~x", "timeout": 0.0}
+    )
+    assert not result.success
+    assert "still present after the swipe" in result.message
+    assert len(driver.swipes) == 1
+
+
+def test_slider_challenge_cleared_polls_until_gone(monkeypatch):
+    """The challenge hides itself asynchronously: a fresh dump must be read
+    on every poll, not a cached one."""
+    _fast_clock(monkeypatch)
+    handle = (
+        '<hierarchy><node bounds="[40,800][120,880]" content-desc="滑块" '
+        'class="android.widget.ImageView"/></hierarchy>'
+    )
+    dumps = [handle, handle, "<hierarchy><node text='点评'/></hierarchy>"]
+    reads = {"n": 0}
+
+    def read():
+        value = dumps[min(reads["n"], len(dumps) - 1)]
+        reads["n"] += 1
+        return value
+
+    from automation_app_dianping.session import slider_challenge_cleared
+
+    assert slider_challenge_cleared(read) is True
+    assert reads["n"] == 3
+    # a challenge that never leaves is reported as not cleared
+    assert slider_challenge_cleared(lambda: handle) is False
 
 
 def test_uia2_attempt_slider_solve_failures(monkeypatch):
@@ -2981,18 +3052,21 @@ def test_appium_guard_slider_solved_then_retry_fails(monkeypatch, tmp_path):
     class Handle:
         def __init__(self):
             self.swipes = []
-
-        @property
-        def page_source(self):
-            # rid carries the "slider" attribute marker for detection while
-            # the text hint satisfies locate_slider_handle's handle query
-            return (
+            self.source = (
                 "<hierarchy><node resource-id='com.x:id/slider' text='slider handle' "
                 "bounds='[40,1000][300,1040]'/></hierarchy>"
             )
 
+        @property
+        def page_source(self):
+            # rid carries the "slider" attribute marker for detection while
+            # the text hint satisfies locate_slider_handle's handle query.
+            # A successful solve clears the challenge from the dump.
+            return self.source
+
         def swipe(self, *args):
             self.swipes.append(args)
+            self.source = "<hierarchy><node text='点评'/></hierarchy>"
 
         def get_screenshot_as_base64(self):
             import base64 as b64
@@ -3992,14 +4066,20 @@ def test_uia2_slider_swipe_raise_and_retry_failure_tails(monkeypatch):
     )
 
     class SwipeDriver:
+        """A successful solve: the swipe dismisses the challenge."""
+
+        def __init__(self):
+            self.source = handle
+
         def dump_hierarchy(self):
-            return handle
+            return self.source
 
         def screenshot(self):
             return b"png"
 
         def swipe(self, *args):
             SwipeDriver.swiped = args
+            self.source = "<hierarchy><node text='点评'/></hierarchy>"
 
     SwipeDriver.swiped = None
 
@@ -5458,7 +5538,7 @@ def test_preferred_tap_rect_label_without_ancestor_wins(monkeypatch):
     assert rect is not None and rect["x"] == 10 and rect["width"] == 70
 
 
-def test_uia2_clear_dish_edit_confirm_failure_propagates(monkeypatch):
+def test_uia2_clear_dish_edit_confirm_message_passed_through(monkeypatch):
     """Confirm returning failure is passed through verbatim (3175)."""
     _fast_clock(monkeypatch)
     recognize = '<node text="识别菜品" bounds="[400,300][700,360]"/>'

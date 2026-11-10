@@ -391,6 +391,14 @@ def test_locate_slider_handle_parses_bounds_center():
 
 
 class FakeSliderDriver(FakeDriver):
+    """A driver whose challenge is dismissed by a successful swipe.
+
+    The guard re-reads the page after the swipe (the gesture itself reports
+    success even when the jigsaw refuses the piece), so the fake has to
+    drop the challenge markers -- otherwise the guard correctly reports
+    "slider challenge still present after the swipe".
+    """
+
     def __init__(self):
         super().__init__()
         self.page_source = _SLIDER_PAGE
@@ -403,6 +411,7 @@ class FakeSliderDriver(FakeDriver):
 
     def swipe(self, start_x, start_y, end_x, end_y, duration=None):
         self.swipes.append((start_x, start_y, end_x, end_y, duration))
+        self.page_source = _CLEAN_PAGE
 
 
 def test_slider_guard_solves_and_retries_action():
@@ -674,7 +683,11 @@ def test_manual_captcha_window_disabled_by_default():
 # --- uia2 slider guard --------------------------------------------------------
 
 class _FakeUia2Driver:
-    """Stand-in for a uiautomator2 device: hierarchy dump, screenshot, swipe."""
+    """Stand-in for a uiautomator2 device: hierarchy dump, screenshot, swipe.
+
+    A successful swipe dismisses the challenge (the guard re-reads the
+    hierarchy afterwards to confirm the puzzle is gone).
+    """
 
     def __init__(self, hierarchy=_SLIDER_PAGE):
         self.hierarchy = hierarchy
@@ -688,6 +701,7 @@ class _FakeUia2Driver:
 
     def swipe(self, start_x, start_y, end_x, end_y, duration=None):
         self.swipes.append((start_x, start_y, end_x, end_y, duration))
+        self.hierarchy = _CLEAN_PAGE
 
 
 class _FakeUia2Kit:

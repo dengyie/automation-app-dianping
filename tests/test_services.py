@@ -6,9 +6,12 @@ from automation_app_dianping.config import DianpingAppConfig, DianpingPublishPol
 from automation_app_dianping.services import (
     PublishGateError,
     assert_publish_allowed,
+    assert_rate_limits,
+    assert_review_allowed,
     draft_to_publish_parameters,
     mark_draft_published,
     prepare_publish_checklist,
+    record_publish,
 )
 from automation_app_dianping.storage import DraftRecord, DraftReview, DraftStore, ReviewRatings
 
@@ -75,3 +78,47 @@ def test_assert_publish_allowed_no_submit_skips_bookkeeping_gates(tmp_path: Path
         assert_publish_allowed(
             draft=short, config=config, data_dir=tmp_path, no_submit=True
         )
+
+
+def test_record_publish_advances_quota_and_interval(tmp_path: Path):
+    """A direct (no-draft) publish still advances the shared bookkeeping."""
+    config = DianpingAppConfig(
+        city="shanghai",
+        publish=DianpingPublishPolicy(max_per_day=1, min_interval_minutes=60),
+    )
+    assert_rate_limits(config=config, data_dir=tmp_path)
+
+    record_publish(data_dir=tmp_path)
+
+    with pytest.raises(PublishGateError, match="quota"):
+        assert_rate_limits(config=config, data_dir=tmp_path)
+
+
+def test_record_publish_counts_toward_the_interval_gate(tmp_path: Path):
+    config = DianpingAppConfig(
+        city="shanghai",
+        publish=DianpingPublishPolicy(max_per_day=5, min_interval_minutes=60),
+    )
+    record_publish(data_dir=tmp_path)
+
+    with pytest.raises(PublishGateError, match="interval"):
+        assert_rate_limits(config=config, data_dir=tmp_path)
+
+
+def test_assert_review_allowed_rejects_all_five_ratings():
+    """The all-five pattern is the low-quality spam signal the project's
+    own review-writing guide warns about."""
+    config = DianpingAppConfig(city="shanghai")
+    body = ("红烧肉肥而不腻，响油鳝丝很香，环境有烟火气，服务利落，值得再来。" * 4)
+    with pytest.raises(PublishGateError, match="all-five"):
+        assert_review_allowed(
+            content=body,
+            ratings={"taste": 5, "environment": 5, "service": 5},
+            config=config,
+        )
+    # a mixed pattern passes
+    assert_review_allowed(
+        content=body,
+        ratings={"taste": 5, "environment": 5, "service": 4},
+        config=config,
+    )
