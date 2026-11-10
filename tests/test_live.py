@@ -297,6 +297,24 @@ def test_dish_hint_from_content_lexicon_matches_real_drafts():
     # No dish named -> empty (generic signature-dish prompt), never a guess.
     assert dish_hint_from_content("这家店环境不错，服务态度也很好，值得再来。") == ""
     assert dish_hint_from_content("") == ""
+    # 潮汕风味（2026-11-10 潮界虹桥南丰城店实拍素材）：同长度的多款
+    # 潮汕菜里，生滚牛肉粥是店内公认的招牌，longest-match 取先出现者。
+    assert dish_hint_from_content(
+        "潮界的生滚牛肉粥粥底米粒开花，牛片烫到刚刚好。"
+    ) == "生滚牛肉粥"
+    assert dish_hint_from_content(
+        "潮汕牛肉丸弹牙，蘸沙茶酱很地道。"
+    ) == "潮汕牛肉丸"
+    assert dish_hint_from_content(
+        "潮界湿炒牛河镬气足，牛肉嫩。"
+    ) == "湿炒牛河"
+    # Longest match still wins among the 潮汕 terms.
+    assert dish_hint_from_content(
+        "潮界湿炒牛河镬气足，生焗蝴蝶虾也点了。"
+    ) == "生焗蝴蝶虾"
+    assert dish_hint_from_content(
+        "卤狮头鹅七拼卤水入味，牛腩煲也软烂。"
+    ) == "卤狮头鹅"
 
 
 def test_build_live_workflow_passes_dish_hint_from_draft(tmp_path: Path, default_photo, monkeypatch):
