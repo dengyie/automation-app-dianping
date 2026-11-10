@@ -47,29 +47,33 @@ def draft_to_publish_parameters(draft: DraftRecord) -> Dict[str, Any]:
     }
 
 
-def assert_publish_allowed(
+def assert_review_allowed(
     *,
-    draft: DraftRecord,
+    content: str,
+    ratings: Dict[str, int],
     config: DianpingAppConfig,
-    data_dir: Path = Path("data"),
-    no_submit: bool = False,
 ) -> None:
+    """Content-quality gate for a publish, draft-backed or not.
+
+    ``validate_review_content`` rejects a too-short body and the all-five
+    rating pattern; both apply to every publish, so this check lives
+    outside the draft-specific gate.
+    """
     error = validate_review_content(
-        draft.draft.content,
-        asdict(draft.draft.ratings),
+        content,
+        ratings,
         min_chinese_chars=config.publish.min_chinese_chars,
     )
     if error:
         raise PublishGateError(error)
-    if no_submit:
-        # Authorized rehearsal stops right before the submit tap, so the
-        # externally-visible bookkeeping gates (already-published, daily
-        # quota, interval) do not apply — a published draft is exactly the
-        # interesting rehearsal target. Content validation above still runs.
-        return
-    if draft.published_at or draft.draft.status == "published":
-        raise PublishGateError("draft already published: %s" % draft.id)
 
+
+def assert_rate_limits(
+    *,
+    config: DianpingAppConfig,
+    data_dir: Path = Path("data"),
+) -> None:
+    """Daily-quota and interval gates from the persisted publish state."""
     state_store = StateStore(data_dir)
     state = state_store.load()
     if not state_store.can_publish_today(state, config.publish.max_per_day):
@@ -81,6 +85,52 @@ def assert_publish_allowed(
     if minutes is not None and minutes < config.publish.min_interval_minutes:
         remaining = config.publish.min_interval_minutes - minutes
         raise PublishGateError("publish interval not met; wait %.1f more minutes" % remaining)
+
+
+def assert_publish_allowed(
+    *,
+    draft: DraftRecord,
+    config: DianpingAppConfig,
+    data_dir: Path = Path("data"),
+    no_submit: bool = False,
+) -> None:
+    assert_review_allowed(
+        content=draft.draft.content,
+        ratings=asdict(draft.draft.ratings),
+        config=config,
+    )
+    if no_submit:
+        # Authorized rehearsal stops right before the submit tap, so the
+        # externally-visible bookkeeping gates (already-published, daily
+        # quota, interval) do not apply — a published draft is exactly the
+        # interesting rehearsal target. Content validation above still runs.
+        return
+    if draft.published_at or draft.draft.status == "published":
+        raise PublishGateError("draft already published: %s" % draft.id)
+    assert_rate_limits(config=config, data_dir=data_dir)
+
+
+def record_publish(
+    *,
+    data_dir: Path = Path("data"),
+    published_at: Optional[str] = None,
+) -> None:
+    """Record one external publish in the shared publish state.
+
+    The draft-backed and the direct (shop_name + content) paths both post
+    to dianping, so both must advance the quota/interval bookkeeping --
+    otherwise the gates in ``assert_rate_limits`` never see the publish
+    that actually happened.
+    """
+    from datetime import datetime, timezone
+
+    stamp = published_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    state_store = StateStore(data_dir)
+    state = state_store.load()
+    state_store.refresh(state)
+    state.today_published_count += 1
+    state.last_published_timestamp = stamp
+    state_store.save(state)
 
 
 def mark_draft_published(
@@ -96,10 +146,5 @@ def mark_draft_published(
     draft.published_at = stamp
     DraftStore(data_dir).save(draft)
 
-    state_store = StateStore(data_dir)
-    state = state_store.load()
-    state_store.refresh(state)
-    state.today_published_count += 1
-    state.last_published_timestamp = stamp
-    state_store.save(state)
+    record_publish(data_dir=data_dir, published_at=stamp)
     return draft

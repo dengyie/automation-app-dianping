@@ -29,6 +29,15 @@ from automation_app_dianping.session import (
     translate_uiautomator_selector,
 )
 
+# A review body that clears the content gate (>= 100 Chinese characters).
+_VALID_REVIEW_BODY = (
+    "工作日中午和同事一起来这家店吃饭，门口排队的人不算多，进门就被引到靠窗的位置。"
+    "点了店里的招牌牛肉丸和一份生滚牛肉粥，牛肉丸弹牙，粥熬得很稠，米粒开花，"
+    "配着自己熬的酱料吃很香。整体味道在线，分量也足，服务员上菜速度快，"
+    "中途还会主动添水收拾桌面。价格属于正常区间，两个人吃下来比较满足，"
+    "下次带朋友来还会再点一次招牌菜。"
+)
+
 
 class FakeKitSession:
     """Duck-typed stand-in for the kit adapters.uia2 session."""
@@ -290,8 +299,13 @@ def test_uia2_launch_app_rejects_non_numeric_settle(monkeypatch):
     assert "settle_seconds must be a number" in result.message
 
 
-def test_build_live_workflow_allows_uia2_publish(monkeypatch):
-    """uia2 publish parity landed (2026-09-20); the former guard is retired."""
+def test_build_live_workflow_allows_uia2_publish(monkeypatch, tmp_path):
+    """uia2 publish parity landed (2026-09-20); the former guard is retired.
+
+    The direct (no-draft) path runs the same content gate as the
+    draft-backed one, so the body has to carry the minimum Chinese
+    character count.
+    """
     from automation_app_dianping.live import build_live_workflow
 
     monkeypatch.setenv("DIANPING_LIVE_E2E", "1")
@@ -300,10 +314,97 @@ def test_build_live_workflow_allows_uia2_publish(monkeypatch):
     workflow = build_live_workflow(
         session_factory=lambda: object(),
         shop_name="店铺",
-        content="内容",
+        content=_VALID_REVIEW_BODY,
+        data_dir=str(tmp_path),
     )
 
     assert workflow is not None
+
+
+def test_direct_publish_path_enforces_content_gate(monkeypatch, tmp_path):
+    """The direct (no-draft) publish path runs the same content gate as
+    the draft-backed one: a too-short body is refused before any device
+    action."""
+    from automation_app_dianping.live import build_live_workflow
+    from automation_app_dianping.services import PublishGateError
+
+    monkeypatch.setenv("DIANPING_LIVE_E2E", "1")
+    monkeypatch.setenv("DIANPING_DRIVER", "uia2")
+
+    with pytest.raises(PublishGateError) as excinfo:
+        build_live_workflow(
+            session_factory=lambda: object(),
+            shop_name="店铺",
+            content="内容",
+            data_dir=str(tmp_path),
+        )
+
+    assert "Chinese characters" in str(excinfo.value)
+
+
+def test_direct_publish_path_enforces_daily_quota(monkeypatch, tmp_path):
+    """The daily quota applies to the direct path too -- otherwise a
+    publish without a draft would walk around the limit."""
+    import json
+    from datetime import date, datetime, timedelta, timezone
+
+    from automation_app_dianping.live import build_live_workflow
+    from automation_app_dianping.services import PublishGateError
+
+    # today's date so the store's day-rollover does not reset the count,
+    # and a timestamp far enough back to clear the interval gate
+    state = tmp_path / "state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "lastPublishedDate": date.today().isoformat(),
+                "todayPublishedCount": 99,
+                "lastPublishedTimestamp": (
+                    datetime.now(timezone.utc) - timedelta(hours=5)
+                ).isoformat().replace("+00:00", "Z"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("DIANPING_LIVE_E2E", "1")
+    monkeypatch.setenv("DIANPING_DRIVER", "uia2")
+
+    with pytest.raises(PublishGateError) as excinfo:
+        build_live_workflow(
+            session_factory=lambda: object(),
+            shop_name="店铺",
+            content=_VALID_REVIEW_BODY,
+            data_dir=str(tmp_path),
+        )
+
+    assert "quota" in str(excinfo.value)
+
+
+def test_direct_publish_path_default_ratings_are_not_all_five(monkeypatch, tmp_path):
+    """The default dimension ratings must clear the all-five spam rule."""
+    from automation_app_dianping.live import build_live_workflow
+
+    monkeypatch.setenv("DIANPING_LIVE_E2E", "1")
+    monkeypatch.setenv("DIANPING_DRIVER", "uia2")
+
+    workflow = build_live_workflow(
+        session_factory=lambda: object(),
+        shop_name="店铺",
+        content=_VALID_REVIEW_BODY,
+        data_dir=str(tmp_path),
+    )
+
+    # the rating steps carry the dimension values; the all-five pattern
+    # must not appear among them
+    dimension_values = [
+        step.parameters.get("value")
+        for step in workflow.steps
+        if getattr(step, "name", "") == "rate"
+        and step.parameters.get("dimension") in {"taste", "environment", "service"}
+    ]
+    assert dimension_values == [5, 5, 4]
+    assert dimension_values != [5, 5, 5]
 
 
 def test_build_live_workflow_smoke_allows_uia2(monkeypatch):

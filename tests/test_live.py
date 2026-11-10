@@ -190,6 +190,90 @@ def test_run_live_no_submit_stops_before_submit(tmp_path: Path):
     assert s.artifacts[-1] == ("screenshot", "publish-no-submit.png")
 
 
+def test_run_live_no_submit_does_not_mark_published(tmp_path: Path):
+    """A rehearsal posts nothing, so it must not advance the publish
+    bookkeeping (the draft stays unpublished, the quota stays untouched)."""
+    from automation_app_dianping.live import run_live, LIVE_FLAG
+    from automation_app_dianping.storage import DraftStore, StateStore
+
+    class S(FakeSession):
+        def __init__(self):
+            super().__init__()
+            self.actions = []
+            self.artifacts = []
+
+        def execute_action(self, action_name, **kwargs):
+            self.actions.append((action_name, kwargs))
+            return ActionResult(success=True, message=action_name, data=kwargs)
+
+        def capture_artifact(self, artifact_type, name):
+            self.artifacts.append((artifact_type, name))
+            return ArtifactHandle(artifact_type=artifact_type, path=Path(name))
+
+    draft = DraftRecord(
+        id="rehearsal-1",
+        shop_url="https://www.dianping.com/shop/rehearsal1",
+        shop_name="排练门店",
+        shop_slug="rehearsal1",
+        draft=DraftReview(
+            content="红烧肉肥而不腻，响油鳝丝很香，环境有烟火气，服务利落，值得再来。" * 4,
+            ratings=ReviewRatings(taste=5, environment=4, service=4),
+            photos=[],
+            status="edited",
+        ),
+    )
+    DraftStore(tmp_path).save(draft)
+
+    result = run_live(
+        mode="publish",
+        draft_id="rehearsal-1",
+        data_dir=str(tmp_path),
+        session_factory=lambda: S(),
+        env={LIVE_FLAG: "1"},
+        mark_published=True,
+        no_submit=True,
+    )
+    assert result.success
+    # nothing was posted → the draft is still editable and the state empty
+    assert DraftStore(tmp_path).load("rehearsal-1").draft.status == "edited"
+    assert StateStore(tmp_path).load().today_published_count == 0
+
+
+def test_run_live_direct_publish_records_the_publish(tmp_path: Path):
+    """A direct (no-draft) publish advances the shared quota bookkeeping."""
+    from automation_app_dianping.live import run_live, LIVE_FLAG
+    from automation_app_dianping.storage import StateStore
+
+    class S(FakeSession):
+        def __init__(self):
+            super().__init__()
+            self.actions = []
+            self.artifacts = []
+
+        def execute_action(self, action_name, **kwargs):
+            self.actions.append((action_name, kwargs))
+            return ActionResult(success=True, message=action_name, data=kwargs)
+
+        def capture_artifact(self, artifact_type, name):
+            self.artifacts.append((artifact_type, name))
+            return ArtifactHandle(artifact_type=artifact_type, path=Path(name))
+
+    content = "红烧肉肥而不腻，响油鳝丝很香，环境有烟火气，服务利落，值得再来。" * 4
+    result = run_live(
+        mode="publish",
+        shop_name="直发门店",
+        content=content,
+        data_dir=str(tmp_path),
+        session_factory=lambda: S(),
+        env={LIVE_FLAG: "1"},
+        mark_published=True,
+    )
+    assert result.success
+    state = StateStore(tmp_path).load()
+    assert state.today_published_count == 1
+    assert state.last_published_timestamp
+
+
 def _slider_solver_with_result(result, eager=True):
     """Build the live slider bridge around a fake capability executor.
 

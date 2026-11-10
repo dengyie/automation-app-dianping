@@ -319,7 +319,12 @@ def build_live_workflow(
         create_workflow_from_composition,
     )
     from automation_app_dianping.config import DianpingAppConfig
-    from automation_app_dianping.services import assert_publish_allowed, draft_to_publish_parameters
+    from automation_app_dianping.services import (
+        assert_publish_allowed,
+        assert_rate_limits,
+        assert_review_allowed,
+        draft_to_publish_parameters,
+    )
     from automation_app_dianping.storage import DraftStore
 
     config = DianpingAppConfig(city=city, app_id=app_id)
@@ -343,14 +348,31 @@ def build_live_workflow(
         if not shop_name or not content:
             raise ValueError("live publish requires draft_id or shop_name+content")
 
+        # The direct path posts to dianping exactly like the draft-backed
+        # one, so it runs the same gates: content quality (length, rating
+        # pattern), daily quota and publish interval. Without this the
+        # quota/interval bookkeeping could be walked around by publishing
+        # without a draft.
+        #
+        # Overall stars stay 5 (the editor derives them from the dimension
+        # mean: round(5+5+4)/3 = 5), while the dimensions are not all-5 --
+        # that pattern is rejected as low-quality spam signal by
+        # validate_review_content and by the project's own review-writing
+        # guide ("不要全部5星 -- 太假").
+        direct_ratings = ratings or {"taste": 5, "environment": 5, "service": 4}
+        assert_review_allowed(
+            content=content,
+            ratings=direct_ratings,
+            config=config,
+        )
+        if not no_submit:
+            assert_rate_limits(config=config, data_dir=Path(data_dir))
+
         parameters = {
             "mode": "publish",
             "shop_name": shop_name,
             "content": content,
-            # All-5 default: the 2026-09 editor derives the overall stars
-            # from these values, and a positive review at 4 stars reads
-            # incoherently on the public page.
-            "ratings": ratings or {"taste": 5, "environment": 5, "service": 5},
+            "ratings": direct_ratings,
             "photos": _resolve_publish_photos(
                 photos,
                 shop_name=shop_name,
@@ -426,11 +448,17 @@ def run_live(
         env=env,
         no_submit=no_submit,
     ).run()
-    if mark_published and result.success and draft_id:
-        from automation_app_dianping.services import mark_draft_published
+    if mark_published and result.success and not no_submit:
+        # The publish is externally visible in both paths, so both advance
+        # the quota/interval bookkeeping -- otherwise a direct (no-draft)
+        # publish would never count against the daily limit.
+        from automation_app_dianping.services import mark_draft_published, record_publish
         from automation_app_dianping.storage import DraftStore
 
-        draft = DraftStore(Path(data_dir)).load(draft_id)
-        if draft is not None:
-            mark_draft_published(draft=draft, data_dir=Path(data_dir))
+        if draft_id:
+            draft = DraftStore(Path(data_dir)).load(draft_id)
+            if draft is not None:
+                mark_draft_published(draft=draft, data_dir=Path(data_dir))
+        else:
+            record_publish(data_dir=Path(data_dir))
     return result

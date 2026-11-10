@@ -264,6 +264,28 @@ def locate_slider_handle(source: str) -> Optional[Tuple[int, int]]:
     return None
 
 
+def slider_challenge_cleared(read_source: Callable[[], str], *, attempts: int = 3) -> bool:
+    """True when a fresh dump no longer carries a slider challenge.
+
+    The swipe itself reports success even when the puzzle stays up (the
+    gesture lands, the jigsaw refuses the piece). Without this check the
+    guard would declare "slider solved; action retried" and the retried
+    action would land on the still-open overlay, whose taps also report
+    success -- the publish would then continue on a blocked screen.
+
+    The dump is polled a couple of times: the challenge hides itself
+    asynchronously after a successful solve, so a single dump taken too
+    early still shows it. ``read_source`` is called again for every poll
+    because the caller reads the live page, not a cached string.
+    """
+    for attempt in range(max(1, attempts)):
+        if not page_source_indicates_slider(read_source()):
+            return True
+        if attempt < max(1, attempts) - 1:
+            time.sleep(0.8)
+    return False
+
+
 def _await_in_worker_thread(awaitable: Any) -> Any:
     """Bridge an awaitable onto a private loop in a worker thread.
 
@@ -499,6 +521,15 @@ class DianpingAppiumSession:
         finally:
             self._manual_window_active = False
 
+    def _appium_page_source(self) -> str:
+        """Current page source as a string ("" when unavailable)."""
+        try:
+            source = getattr(self.driver, "page_source", "")
+        except Exception as exc:
+            _log_swallowed("slider guard page source", exc)
+            return ""
+        return source if isinstance(source, str) else ""
+
     def _guard_slider(self, action_name: str, result: ActionResult, kwargs: Dict[str, Any]) -> ActionResult:
         """Detect risk-control sliders that appeared during an action.
 
@@ -508,12 +539,8 @@ class DianpingAppiumSession:
         """
         if self._slider_guard_active:
             return result
-        try:
-            source = getattr(self.driver, "page_source", "")
-        except Exception as exc:
-            _log_swallowed("slider guard page source", exc)
-            return result
-        if not isinstance(source, str) or not page_source_indicates_slider(source):
+        source = self._appium_page_source()
+        if not source or not page_source_indicates_slider(source):
             return result
         self._slider_guard_active = True
         try:
@@ -522,6 +549,14 @@ class DianpingAppiumSession:
                 return ActionResult(
                     False,
                     "slider challenge detected during %s; %s" % (action_name, solve.message),
+                )
+            # The swipe reports success even when the jigsaw refuses the
+            # piece; only a fresh dump proves the challenge is gone.
+            if not slider_challenge_cleared(self._appium_page_source):
+                return ActionResult(
+                    False,
+                    "slider challenge still present after the swipe during %s"
+                    % action_name,
                 )
             retry = self.execute_action(action_name, **kwargs)
             if not retry.success:
@@ -2219,6 +2254,14 @@ class DianpingUia2Session:
                 return ActionResult(
                     False,
                     "slider challenge detected during %s; %s" % (action_name, solve.message),
+                )
+            # The swipe reports success even when the jigsaw refuses the
+            # piece; only a fresh dump proves the challenge is gone.
+            if not slider_challenge_cleared(self._hierarchy_source):
+                return ActionResult(
+                    False,
+                    "slider challenge still present after the swipe during %s"
+                    % action_name,
                 )
             retry = self.execute_action(action_name, **kwargs)
             if not retry.success:
