@@ -5924,6 +5924,139 @@ def test_uia2_dismiss_dialogs_blind_fallback_on_unparseable_dump(monkeypatch):
     assert [c[0] for c in kit.calls] == ["tap"]
 
 
+# --- the editor's own toolbar must never be mistaken for a dialog -----------
+
+# Geometry and ancestry mirror the live 2026-11-10 capture
+# (artifacts/editor_with_photo.xml): the review editor's 取消 is a
+# non-clickable TextView under com.dianping.v1:id/picasso_view.
+_EDITOR_CHROME_DUMP = (
+    "<hierarchy>"
+    '<node resource-id="com.dianping.v1:id/picasso_view" bounds="[0,0][1080,2355]">'
+    '<node resource-id="com.dianping.v1:id/action_bar_root" bounds="[0,68][1080,209]">'
+    '<node text="取消" bounds="[34,117][106,159]"/>'
+    "</node>"
+    '<node text="添加图/视频" bounds="[364,1665][559,1707]"/>'
+    "</node>"
+    "</hierarchy>"
+)
+
+# The leftover-review modal is a DIFFERENT window: 暂不查看 lives under
+# stimulate_layout, never under the editor root (live 2026-11-10 capture).
+_MODAL_DUMP = (
+    "<hierarchy>"
+    '<node resource-id="com.dianping.v1:id/stimulate_layout" bounds="[146,1026][934,1396]">'
+    '<node text="你有一条编辑中的评价" bounds="[235,1096][845,1157]"/>'
+    '<node text="暂不查看" bounds="[202,1213][525,1326]"/>'
+    "</node>"
+    "</hierarchy>"
+)
+
+
+def test_editor_chrome_hit_only_fires_for_editor_owned_labels():
+    """The 取消 under the editor root is chrome; the modal's 暂不查看 is not."""
+    assert session_mod.editor_chrome_hit(_EDITOR_CHROME_DUMP, "text", "取消") is True
+    assert session_mod.editor_chrome_hit(_MODAL_DUMP, "text", "暂不查看") is False
+    # A label that matches nothing is not a chrome hit.
+    assert session_mod.editor_chrome_hit(_EDITOR_CHROME_DUMP, "text", "我知道了") is False
+    # An empty / unparseable tree proves nothing.
+    assert session_mod.editor_chrome_hit("", "text", "取消") is False
+    assert session_mod.editor_chrome_hit("not-xml", "text", "取消") is False
+
+
+def test_editor_chrome_hit_keeps_a_real_dialog_with_the_same_label():
+    """A 取消 that lives OUTSIDE the editor is a real dialog button and must
+    still be dismissible."""
+    mixed = (
+        "<hierarchy>"
+        '<node resource-id="com.dianping.v1:id/picasso_view">'
+        '<node text="取消" bounds="[34,117][106,159]"/>'
+        "</node>"
+        '<node resource-id="com.dianping.v1:id/stimulate_layout">'
+        '<node text="取消" bounds="[202,1213][525,1326]"/>'
+        "</node>"
+        "</hierarchy>"
+    )
+    assert session_mod.editor_chrome_hit(mixed, "text", "取消") is False
+
+
+def test_uia2_dismiss_dialogs_never_taps_the_editor_cancel(monkeypatch):
+    """The editor's own 取消 must not be tapped as if it were a dialog.
+
+    Tapping it discards the draft the workflow is about to fill in while
+    the step reports 'dismissed' — the silent wrong-direction failure."""
+    _fast_clock(monkeypatch)
+    kit = _SeqKit(_NavDriver([_EDITOR_CHROME_DUMP]))
+    kit.results["tap"] = ActionResult(True, "tapped")
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    out = session._dismiss_dialogs(
+        selector=('uiautomator:new UiSelector().text("取消")',), max_attempts=3
+    )
+    assert out.success
+    assert out.data == {"dismissed": 0}
+    assert kit.calls == []
+
+
+def test_uia2_dismiss_dialogs_still_taps_the_leftover_review_modal(monkeypatch):
+    """The real modal's 暂不查看 lives outside the editor root and must keep
+    being dismissed (live 2026-11-09 behaviour)."""
+    _fast_clock(monkeypatch)
+    kit = _SeqKit(_NavDriver([_MODAL_DUMP]))
+    kit.results["tap"] = ActionResult(True, "tapped")
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    out = session._dismiss_dialogs(
+        selector=('uiautomator:new UiSelector().text("暂不查看")',), max_attempts=1
+    )
+    assert out.success
+    assert out.data == {"dismissed": 1}
+    assert [c[0] for c in kit.calls] == ["tap"]
+
+
+def test_uia2_dismiss_dialogs_blind_path_skips_editor_toolbar_labels(monkeypatch):
+    """With a wedged dump channel there is no tree to prove which node a
+    selector reaches — the editor's own toolbar labels are still excluded,
+    because that is the one known way to destroy a draft by accident."""
+    _fast_clock(monkeypatch)
+    kit = _SeqKit(_NavDriver(["not-xml"]))
+    kit.results["tap"] = ActionResult(True, "tapped")
+    session = DianpingUia2Session(kit, captcha_window_seconds=0)
+    out = session._dismiss_dialogs(
+        selector=(
+            'uiautomator:new UiSelector().text("取消")',
+            'uiautomator:new UiSelector().text("残忍拒绝")',
+        ),
+        max_attempts=1,
+    )
+    assert out.success
+    assert out.data == {"dismissed": 1}
+    tapped = [c[1].get("selector") for c in kit.calls]
+    assert tapped == ["残忍拒绝"]
+
+
+def test_appium_dismiss_dialogs_drops_editor_chrome_candidates(tmp_path):
+    """The Appium path carries the same 取消 candidate and the same editor
+    toolbar, so the same filter applies."""
+    from automation_app_dianping.session import DianpingAppiumSession
+
+    driver = _MiniDriver()
+    driver.page_source = _EDITOR_CHROME_DUMP
+    session = DianpingAppiumSession(driver, artifact_root=tmp_path)
+    kept = session._dialog_candidates_excluding_editor_chrome(
+        (
+            'uiautomator:new UiSelector().text("取消")',
+            'uiautomator:new UiSelector().text("我知道了")',
+        )
+    )
+    assert kept == ['uiautomator:new UiSelector().text("我知道了")']
+
+    # Outside the editor the candidate stays.
+    driver.page_source = _MODAL_DUMP
+    session2 = DianpingAppiumSession(driver, artifact_root=tmp_path)
+    kept2 = session2._dialog_candidates_excluding_editor_chrome(
+        ('uiautomator:new UiSelector().text("暂不查看")',)
+    )
+    assert kept2 == ['uiautomator:new UiSelector().text("暂不查看")']
+
+
 class _ShellCountDriver:
     """adb device fake: records shell calls, scripts the bucket row query."""
 
