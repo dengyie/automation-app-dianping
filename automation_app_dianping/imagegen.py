@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-GEN_BASE_URL = "https://api.mangoqwq.com/v1"
+GEN_BASE_URL = "http://10.144.144.32:3000/v1"
 GEN_IMAGE_MODEL = "gpt-image-2"
 _GEN_TIMEOUT_S = 150.0
 _GEN_RETRIES = 2
