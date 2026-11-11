@@ -3026,6 +3026,17 @@ class DianpingUia2Session:
         if self._results_page_open(source, shop_name, kwargs):
             print("[dianping-uia2] navigate: restored search results page", flush=True)
             return self._advance_from_search_results(shop_name, kwargs)
+        # A relaunch can also restore the app onto the search suggestion page
+        # (live 2026-11-12: search_keyword_edit on screen, home bar under the
+        # task top). BACK from there exits the app — but the suggestion page
+        # is itself a valid search entry, so type straight into it.
+        if self._marker_present_now(self._SUGGESTION_PAGE_MARKER):
+            print(
+                "[dianping-uia2] navigate: restored suggestion page; typing directly",
+                flush=True,
+            )
+            emit(self.event_log, "navigate", outcome="restored suggestion page; typing directly")
+            return self._search_from_suggestion(shop_name, kwargs)
         # The kit wait resolves lazily and reports success on pages without
         # the bar (live 2026-10-17: the 设置 page faked a success and the
         # search tap then burned 60s on absent selectors), so the on-page
@@ -3128,6 +3139,35 @@ class DianpingUia2Session:
         print("[dianping-uia2] navigate: results page ready", flush=True)
         return self._advance_from_search_results(shop_name, kwargs)
 
+    def _search_from_suggestion(self, shop_name: str, kwargs: Dict[str, Any]) -> ActionResult:
+        """Search from the restored suggestion page instead of unwinding home.
+
+        A warm start lands on the suggestion page with the home bar buried
+        under it (live 2026-11-12): the home-bar wait fails, and BACK from the
+        task top exits the app rather than revealing home. The page already
+        carries a working input (search_keyword_edit), so the normal search
+        flow — type, confirm, wait for results — runs from right here.
+        """
+        print("[dianping-uia2] navigate: search page ready (restored)", flush=True)
+        typed = self._with_translated_candidates(
+            "type_text",
+            {"selector": kwargs.get("search_input"), "text": shop_name},
+        )
+        if not typed.success:
+            return typed
+        confirmed = self._confirm_search(
+            selector=kwargs.get("search_confirm"),
+            keycode=66,
+        )
+        if not confirmed.success:
+            return confirmed
+        print("[dianping-uia2] navigate: search confirmed (%s)" % confirmed.message, flush=True)
+        wait = self._wait_for_marker(kwargs.get("search_results_marker"), 12.0)
+        if not wait.success:
+            return wait
+        print("[dianping-uia2] navigate: results page ready", flush=True)
+        return self._advance_from_search_results(shop_name, kwargs)
+
     _PENDING_TAB = ('uiautomator:new UiSelector().text("我的")',)
     _PENDING_ENTRY = (
         'uiautomator:new UiSelector().textContains("待评价")',
@@ -3152,6 +3192,17 @@ class DianpingUia2Session:
         # if it truly is absent.
         'uiautomator:new UiSelector().textContains("历史搜索")',
         'uiautomator:new UiSelector().textContains("搜索发现")',
+    )
+
+    _SUGGESTION_PAGE_MARKER = (
+        # The suggestion page's own input field. A warm start restores the
+        # app onto this page with the home bar underneath it (live
+        # 2026-11-12): the home search-bar wait then fails, and BACK from
+        # the task top exits the app instead of revealing home. When this
+        # marker is on screen the suggestion page IS a valid search entry —
+        # type straight into it instead of unwinding.
+        "id:com.dianping.v1:id/search_keyword_edit",
+        'uiautomator:new UiSelector().resourceId("com.dianping.v1:id/search_keyword_edit")',
     )
 
     def _marker_present_now(self, candidates: Any) -> bool:

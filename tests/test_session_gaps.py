@@ -5820,6 +5820,9 @@ def test_uia2_navigate_search_fallback_reestablishes_home(monkeypatch):
     # 待评价 entry; the shop row never appears. The fallback's home check
     # re-dumps: still 我的 tab (no 搜索) → _back_to_home_search presses BACK
     # and its post-BACK dump shows home with the search bar → search tap.
+    # The restored-suggestion-page probe (live 2026-11-12) consumes one more
+    # entry dump after the page-identity reads; pending_page carries no
+    # search_keyword_edit so the flow proceeds unchanged.
     pending_page = _nav_source(
         '<node text="我的" bounds="[900,2300][1000,2380]"/>',
         '<node text="待评价" bounds="[100,400][260,450]"/>',
@@ -5830,6 +5833,7 @@ def test_uia2_navigate_search_fallback_reestablishes_home(monkeypatch):
     )
     dumps = [
         home,          # entry source read (page-identity checks)
+        pending_page,  # restored-suggestion-page probe → absent
         home,          # entry on_home check → True (skip BACK unwind)
         pending_page,  # pending path: 我的 tab check
         pending_page,  # 我的 tab tap dump + 待评价 wait
@@ -5898,6 +5902,50 @@ def test_uia2_navigate_search_input_wait_recovers_via_secondary_marker(monkeypat
     # The flow moved past both input waits; it dies honestly at the results
     # marker, which the static fixture never shows.
     assert result.message == "timed out waiting for page marker (12.0s)"
+
+
+def test_uia2_navigate_restored_suggestion_page_types_directly(monkeypatch, capsys):
+    """Live 2026-11-12 (OnePlus 7T): a warm start restored the app onto the
+    search suggestion page (search_keyword_edit on screen) with the home bar
+    buried under the task top. The home-bar wait failed, and BACK from the
+    task top exits the app instead of revealing home — run 5 died with
+    'home search bar not reached via BACK'. The suggestion page is itself a
+    valid search entry: type straight into it, confirm, and continue."""
+    _fast_clock(monkeypatch)
+    base = {
+        "shop_name": "味香斋(雁荡路店)",
+        "write_selector": 'uiautomator:new UiSelector().text("写评价")',
+        "search_bar": 'uiautomator:new UiSelector().text("搜索")',
+        "search_input": (
+            'uiautomator:new UiSelector().resourceId('
+            '"com.dianping.v1:id/search_keyword_edit")'
+        ),
+        "search_confirm": None,
+        "search_results_marker": 'uiautomator:new UiSelector().text("有点评")',
+        "shop_result": None,
+    }
+    suggestion = _nav_source(
+        '<node resource-id="com.dianping.v1:id/search_keyword_edit"'
+        ' class="android.widget.EditText" text="" bounds="[168,90][772,190]"/>',
+        '<node text="历史搜索" bounds="[40,300][200,360]"/>',
+    )
+    results = _nav_source(
+        '<node text="商户" bounds="[214,229][310,270]"/>',
+        '<node text="味香斋(雁荡路店)" bounds="[34,600][679,650]"/>',
+    )
+    dumps = [
+        suggestion,  # entry source read (page-identity checks)
+        suggestion,  # restored-suggestion-page probe → present → branch
+    ]
+    driver = _NavDriver(dumps)
+    session = DianpingUia2Session(_SeqKit(driver), captcha_window_seconds=0)
+    result = session._navigate_to_review_editor(**base)
+    out = capsys.readouterr().out
+    # typed without any BACK press (keycode 66 is the confirm Enter from
+    # _confirm_search; a BACK unwind would add KEYCODE_BACK=4 presses)
+    assert "restored suggestion page; typing directly" in out
+    assert 4 not in driver.presses
+    assert "home search bar not reached" not in result.message
 
 
 def test_uia2_navigate_pending_tap_fail_does_not_back_out_of_home(monkeypatch):
