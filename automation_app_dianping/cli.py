@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -117,6 +118,43 @@ def _apply_live_env(args, env: dict) -> dict:
     return updated
 
 
+def _persist_live_report(result, artifact_root: Path) -> Optional[Path]:
+    """Write the run's summary report next to its artifacts (best-effort).
+
+    The report used to exist only in the terminal scrollback; a run analysed
+    hours later needs it on disk beside the event log, screenshots and page
+    dumps.
+    """
+    payload = {
+        "success": bool(getattr(result, "success", False)),
+        "state": str(getattr(getattr(result, "state", None), "value", getattr(result, "state", None))),
+        "error": getattr(result, "error", None),
+        "actions": [
+            {"message": getattr(a, "message", None), "success": getattr(a, "success", None)}
+            for a in (getattr(result, "actions", None) or [])
+        ],
+        "artifacts": [
+            {"type": getattr(a, "artifact_type", None), "path": str(getattr(a, "path", ""))}
+            for a in (getattr(result, "artifacts", None) or [])
+        ],
+    }
+    failure = getattr(result, "failure", None)
+    if failure is not None:
+        payload["failure"] = {
+            "step": getattr(failure, "step_name", None),
+            "message": getattr(failure, "message", None),
+        }
+    path = artifact_root / "reports" / ("live-%s.json" % time.strftime("%Y%m%d-%H%M%S"))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return path
+    except Exception:
+        return None
+
+
 def cmd_live(args) -> int:
     from automation_app_dianping.config import DianpingDeviceConfig
     from automation_app_dianping.live import run_live
@@ -132,25 +170,37 @@ def cmd_live(args) -> int:
             port=args.appium_port or 4723,
             captcha_window_seconds=args.captcha_window,
         )
-
-    return _print_result(
-        run_live(
-            mode=args.mode,
-            draft_id=args.draft_id,
-            data_dir=args.data_dir,
-            city=args.city,
-            app_id=args.app_id,
-            enable_slidex=args.enable_slidex,
-            shop_name=args.shop_name,
-            content=args.content,
-            dish_hint=getattr(args, "dish_hint", "") or "",
-            photos=args.photos,
-            device=device,
-            env=_apply_live_env(args, os.environ),
-            mark_published=args.mark_published,
-            no_submit=args.no_submit,
-        )
+    artifact_root = Path(
+        (device.artifact_root if device else None)
+        or os.environ.get("DIANPING_ARTIFACT_ROOT")
+        or "artifacts/dianping-live"
     )
+
+    result = run_live(
+        mode=args.mode,
+        draft_id=args.draft_id,
+        data_dir=args.data_dir,
+        city=args.city,
+        app_id=args.app_id,
+        enable_slidex=args.enable_slidex,
+        shop_name=args.shop_name,
+        content=args.content,
+        dish_hint=getattr(args, "dish_hint", "") or "",
+        photos=args.photos,
+        device=device,
+        env=_apply_live_env(args, os.environ),
+        mark_published=args.mark_published,
+        no_submit=args.no_submit,
+    )
+    report_path = _persist_live_report(result, artifact_root)
+    logs_dir = artifact_root / "logs"
+    if report_path is not None:
+        print(
+            "[dianping] run report: %s (event logs under %s)"
+            % (report_path, logs_dir),
+            flush=True,
+        )
+    return _print_result(result)
 
 
 def cmd_prepare(args) -> int:

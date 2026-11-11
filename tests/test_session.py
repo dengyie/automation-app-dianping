@@ -820,7 +820,7 @@ def test_build_session_factory_passes_slider_solver_to_uia2(monkeypatch):
 
     received = []
 
-    def fake_builder(config, *, slider_solver=None):
+    def fake_builder(config, *, slider_solver=None, event_log=None):
         received.append(slider_solver)
         return lambda: None
 

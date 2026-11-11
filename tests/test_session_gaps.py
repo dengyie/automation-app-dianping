@@ -23,6 +23,7 @@ def _slidex_vision_ready():
 from automation_core.drivers import ActionResult, ArtifactHandle, SessionInfo
 
 import automation_app_dianping.session as session_mod
+from automation_app_dianping.runlog import RunEventLog
 from automation_app_dianping.session import (
     DianpingAppiumSession,
     DianpingUia2Session,
@@ -6550,4 +6551,161 @@ def test_geometry_windows_scale_to_the_dump_device():
     )
     assert abs(session_mod.device_geometry_scale(wide) - 1440 / 1080.0) < 1e-9
     assert abs(session_mod._screen_height_scale(wide) - 3200 / 2400.0) < 1e-9
+
+
+# --- per-run JSONL event log (2026-11-12: post-run analysis) -----------------
+
+
+def _read_events(path):
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
+
+
+def test_run_event_log_writes_jsonl_and_parks_after_failure(tmp_path):
+    from automation_app_dianping.runlog import RunEventLog, emit
+
+    log = RunEventLog(tmp_path / "logs" / "run.jsonl")
+    log.event("action", action="tap", phase="end", ok=True, seconds=0.4)
+    log.event("rate", stars_found=5, point=[188, 450])
+    # Non-JSON fields and oversized strings are coerced, never raised.
+    log.event("slider_swipe", handle=(158, 1564), message="x" * 5000)
+    events = _read_events(tmp_path / "logs" / "run.jsonl")
+    assert [e["kind"] for e in events] == ["action", "rate", "slider_swipe"]
+    assert events[0]["action"] == "tap" and events[0]["ok"] is True
+    assert events[2]["handle"] == [158, 1564]
+    assert len(events[2]["message"]) <= 400
+
+    # First write failure parks the logger: no retry-spam, no raise.
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("file, not dir", encoding="utf-8")
+    unwritable = RunEventLog(blocker / "nested" / "run.jsonl")
+    unwritable.event("action", action="tap")
+    unwritable.event("action", action="tap")  # parked: still no raise
+    assert emit(None, "action") is None  # offline no-op
+
+
+def test_uia2_dismiss_dialogs_logs_the_chrome_filter_decision(tmp_path, monkeypatch):
+    """The post-run question is not 'did it dismiss' but 'what was on screen
+    and what did the filter skip' -- the 2026-11-12 analysis needed dump
+    archaeology to answer exactly that."""
+    _fast_clock(monkeypatch)
+    kit = _SeqKit(_NavDriver([_EDITOR_CHROME_DUMP]))
+    kit.results["tap"] = ActionResult(True, "tapped")
+    log_path = tmp_path / "logs" / "run.jsonl"
+    session = DianpingUia2Session(
+        kit, captcha_window_seconds=0,
+        event_log=RunEventLog(log_path),
+    )
+    out = session.execute_action(
+        "dismiss_dialogs",
+        selector=('uiautomator:new UiSelector().text("取消")',), max_attempts=2,
+    )
+    assert out.success and out.data == {"dismissed": 0}
+    events = _read_events(log_path)
+    assert events[0]["kind"] == "action" and events[0]["phase"] == "start"
+    ended = [e for e in events if e["kind"] == "action" and e.get("phase") == "end"]
+    assert ended and ended[-1]["action"] == "dismiss_dialogs" and ended[-1]["ok"] is True
+    dismiss = [e for e in events if e["kind"] == "dismiss_dialogs"]
+    assert dismiss[-1]["outcome"] == "nothing on screen"
+
+    # A real dialog candidate still shows up as tapped, with its label.
+    kit2 = _SeqKit(_NavDriver([_MODAL_DUMP]))
+    kit2.results["tap"] = ActionResult(True, "tapped")
+    log_path2 = tmp_path / "logs" / "run2.jsonl"
+    session2 = DianpingUia2Session(
+        kit2, captcha_window_seconds=0,
+        event_log=RunEventLog(log_path2),
+    )
+    session2._dismiss_dialogs(
+        selector=('uiautomator:new UiSelector().text("暂不查看")',), max_attempts=1
+    )
+    events2 = _read_events(log_path2)
+    tapped = [e for e in events2 if e.get("outcome") == "tapped"]
+    assert tapped and tapped[0]["candidate"] == "text=暂不查看"
+
+
+def test_uia2_rate_and_slider_log_their_decisions(tmp_path, monkeypatch):
+    _fast_clock(monkeypatch)
+    log_path = tmp_path / "logs" / "run.jsonl"
+
+    # Overall rate: the star row is found and the chosen point logged.
+    star_dump = (
+        "<hierarchy>"
+        '<node text="很棒" class="android.widget.TextView" bounds="[883,253][949,292]" />'
+        '<node class="android.widget.ImageView" bounds="[144,313][233,402]" />'
+        '<node class="android.widget.ImageView" bounds="[320,313][409,402]" />'
+        '<node class="android.widget.ImageView" bounds="[496,313][585,402]" />'
+        '<node class="android.widget.ImageView" bounds="[671,313][760,402]" />'
+        '<node class="android.widget.ImageView" bounds="[847,313][936,402]" />'
+        "</hierarchy>"
+    )
+    kit = _SeqKit(_NavDriver([star_dump]))
+    kit.results["swipe"] = ActionResult(True, "swiped")
+    session = DianpingUia2Session(kit, captcha_window_seconds=0, event_log=RunEventLog(log_path))
+    out = session.execute_action(
+        "rate", dimension="overall", value=5, anchor="overall",
+        selector=('uiautomator:new UiSelector().text("很棒")',),
+    )
+    assert out.success
+    events = _read_events(log_path)
+    star = [e for e in events if e["kind"] == "rate" and e.get("anchor") == "overall"]
+    assert star and star[-1]["stars_found"] == 5 and star[-1]["point"][1] == 357
+
+    # Slider: handle miss and successful swipe are both on the record.
+    kit2 = _SeqKit(_NavDriver(["<hierarchy/>"]))
+    log_path2 = tmp_path / "logs" / "run2.jsonl"
+    session2 = DianpingUia2Session(kit2, captcha_window_seconds=0, event_log=RunEventLog(log_path2))
+    miss = session2._perform_slider_swipe(gap_x=500)
+    assert not miss.success
+    events2 = _read_events(log_path2)
+    assert events2[-1]["kind"] == "slider_swipe"
+    assert events2[-1]["outcome"] == "handle not located"
+
+
+def test_factories_wire_a_run_log_under_the_artifact_root(tmp_path, monkeypatch):
+    from automation_app_dianping.config import DianpingDeviceConfig
+    from automation_app_dianping.runlog import RunEventLog
+    from automation_app_dianping.session import build_session_factory
+
+    class _BootDriver:
+        def dump_hierarchy(self):
+            return "<hierarchy/>"
+
+        def click(self, x, y):
+            pass
+
+    class _StubKit(_SeqKit):
+        def __init__(self, device, identifier="stub", artifact_root=None):
+            super().__init__(device)
+            self.artifact_root = artifact_root
+
+    config = DianpingDeviceConfig(
+        udid="fake-udid", artifact_root=str(tmp_path / "artifacts")
+    )
+    monkeypatch.setattr(session_mod, "_connect_uia2", lambda udid: _BootDriver())
+    monkeypatch.setattr(session_mod, "_import_kit_uia2_session", lambda: _StubKit)
+    factory = build_session_factory(config, driver="uia2")
+    session = factory()
+    assert isinstance(session.event_log, RunEventLog)
+    session.execute_action("dismiss_dialogs", selector=("~关闭",), max_attempts=1)
+    logs = list((tmp_path / "artifacts" / "logs").glob("run-*.jsonl"))
+    assert logs, "the factory must create the run log under artifacts/logs"
+    events = _read_events(logs[0])
+    assert any(e["kind"] == "action" and e["action"] == "dismiss_dialogs" for e in events)
+
+
+def test_cli_persists_the_live_report(tmp_path):
+    import automation_app_dianping.cli as cli_mod
+
+    class _Result:
+        success = True
+        state = "completed"
+        error = None
+        actions = []
+        artifacts = []
+        failure = None
+
+    report = cli_mod._persist_live_report(_Result(), tmp_path / "artifacts")
+    assert report is not None and report.exists()
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["success"] is True and payload["actions"] == []
 
