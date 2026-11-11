@@ -6344,3 +6344,210 @@ def test_uia2_point_select_guard_fails_without_vision_channel(monkeypatch):
     result = session._guard_point_select("tap", ActionResult(True, "tap"), {})
     assert not result.success
     assert "vision channel not configured" in result.message
+
+
+# --- round-2 review fixes (2026-11-12) ---------------------------------------
+
+
+def test_locate_slider_handle_prefers_the_jigsaw_handle_over_chrome():
+    """Live 2026-11-10 jigsaw dump: the challenge chrome shares the handle's
+    id substrings and PRECEDES its children in document order, so the old
+    first-match scan returned puzzleSliderContainer's centre (540,1211) --
+    the middle of the puzzle picture -- instead of the draggable handle
+    (158,1564). The drag then started where nothing is draggable."""
+    dump = (
+        "<hierarchy>"
+        '<node resource-id="puzzleSliderContainer" bounds="[76,642][1004,1781]"/>'
+        '<node resource-id="puzzleSliderTitle" bounds="[121,715][959,785]"/>'
+        '<node resource-id="puzzleImageMain" bounds="[121,830][959,1460]"/>'
+        '<node resource-id="puzzleSliderDrag" bounds="[121,830][388,1460]"/>'
+        '<node resource-id="puzzleBoxWrap" bounds="[121,1502][959,1629]"/>'
+        '<node resource-id="puzzleSliderBox" bounds="[121,1502][250,1629]"/>'
+        '<node resource-id="puzzleSliderMoveingBar" bounds="[121,1502][196,1626]"/>'
+        '<node resource-id="puzzleSliderRefresh" bounds="[897,1668][959,1730]"/>'
+        "</hierarchy>"
+    )
+    assert session_mod.locate_slider_handle(dump) == (158, 1564)
+
+    # The desc-hinted nc_1 handle (no puzzle ids) keeps its path.
+    nc = (
+        '<hierarchy><node bounds="[40,800][120,880]" content-desc="滑块" '
+        'class="android.widget.ImageView"/>'
+        '<node resource-id="com.dianping.v1:id/nc_1_wrapper" '
+        'class="android.view.View"/></hierarchy>'
+    )
+    assert session_mod.locate_slider_handle(nc) == (80, 840)
+    assert session_mod.locate_slider_handle("not xml") is None
+
+
+@pytest.mark.skipif(not _slidex_vision_ready(), reason="slidex vision surface missing")
+def test_riskctl_vision_channel_reads_the_real_config_fields(monkeypatch):
+    """vision_channel_from_env used to read vision_endpoint/vision_api_key/
+    vision_model -- attributes LlmVisionConfig never had -- so the channel
+    was None even with SLIDEX_VISION_* fully set and the point-select guard
+    could never arm."""
+    from automation_app_dianping import riskctl
+
+    monkeypatch.setenv("SLIDEX_VISION_ENDPOINT", "https://api.example/v1/chat/completions")
+    monkeypatch.setenv("SLIDEX_VISION_API_KEY", "sk-test")
+    monkeypatch.setenv("SLIDEX_VISION_MODEL", "gemini-3.8-flash")
+    channel = riskctl.vision_channel_from_env()
+    assert channel is not None
+    endpoint, api_key, model, _timeout = channel
+    assert endpoint == "https://api.example/v1/chat/completions"
+    assert api_key == "sk-test"
+    assert model == "gemini-3.8-flash"
+
+
+def test_overall_star_row_survives_the_dimension_value_chips():
+    """The 2026-11 editor renders 口味/环境/服务 current-value chips with the
+    same caption labels (超预期/很棒) further down the page. max() over every
+    label pushed caption_bottom to 874 and left the overall star row (cy
+    450) with no candidate window -- overall_star_row_rects returned () on
+    every 2026-11 editor dump and the overall rate step failed."""
+    dump = (
+        "<hierarchy>"
+        '<node text="很糟糕" bounds="[164,346][263,385]"/>'
+        '<node text="较差" bounds="[356,346][422,385]"/>'
+        '<node text="一般" bounds="[531,346][597,385]"/>'
+        '<node text="还可以" bounds="[690,346][789,385]"/>'
+        '<node text="超预期" bounds="[866,346][965,385]"/>'
+        '<node class="android.widget.ImageView" bounds="[144,410][233,490]"/>'
+        '<node class="android.widget.ImageView" bounds="[320,410][409,490]"/>'
+        '<node class="android.widget.ImageView" bounds="[496,410][585,490]"/>'
+        '<node class="android.widget.ImageView" bounds="[671,410][760,490]"/>'
+        '<node class="android.widget.ImageView" bounds="[847,410][936,490]"/>'
+        '<node text="口味" bounds="[68,584][140,626]"/>'
+        '<node text="超预期" bounds="[889,584][997,626]"/>'
+        '<node text="环境" bounds="[68,708][140,750]"/>'
+        '<node text="很棒" bounds="[889,708][997,750]"/>'
+        '<node text="服务" bounds="[68,832][140,874]"/>'
+        '<node text="很棒" bounds="[889,832][997,874]"/>'
+        "</hierarchy>"
+    )
+    stars = session_mod.overall_star_row_rects(dump)
+    assert len(stars) == 5
+    assert all(y == 450 for _x, y in stars)
+
+
+def test_device_config_rebuild_keeps_the_captcha_window():
+    """--captcha-window landed on the caller-built config and died in the
+    device_config_from_env rebuild: both sessions then saw 0.0 and the
+    manual-recovery retry loop never armed."""
+    from automation_app_dianping.config import DianpingDeviceConfig
+
+    rebuilt = session_mod.device_config_from_env(
+        {}, base=DianpingDeviceConfig(captcha_window_seconds=300.0)
+    )
+    assert rebuilt.captcha_window_seconds == 300.0
+
+
+def test_review_publish_chrome_needs_the_bottom_bar_button():
+    """review_publish_chrome_visible was a whole-dump substring scan: a shop
+    page whose reviewer badge reads 发布过3条馄饨... looked like the editor and
+    froze the BACK unwind at 'refusing BACK with editor chrome visible'."""
+    # Real shop-page shape: the word only appears inside longer badge text.
+    shop = (
+        "<hierarchy>"
+        '<node text="金虹桥商场" bounds="[178,106][705,153]"/>'
+        '<node text="发布过3条馄饨|抄手|扁食评价" bounds="[404,1123][770,1156]"/>'
+        '<node text="写评价" bounds="[194,2255][284,2292]"/>'
+        '<node bounds="[0,2355][1080,2400]"/>'
+        "</hierarchy>"
+    )
+    assert session_mod.review_publish_chrome_visible(shop) is False
+
+    # The editor's own control: exact text, pinned to the bottom bar.
+    editor = (
+        "<hierarchy>"
+        '<node text="说评价" bounds="[675,1665][783,1707]"/>'
+        '<node text="发布" bounds="[189,2200][1035,2313]"/>'
+        '<node bounds="[0,2355][1080,2400]"/>'
+        "</hierarchy>"
+    )
+    assert session_mod.review_publish_chrome_visible(editor) is True
+
+    # A 发布 button OUTSIDE the bottom bar is not the editor's bar either.
+    top_button = (
+        "<hierarchy>"
+        '<node text="发布" bounds="[900,84][1047,123]"/>'
+        '<node bounds="[0,2355][1080,2400]"/>'
+        "</hierarchy>"
+    )
+    assert session_mod.review_publish_chrome_visible(top_button) is False
+
+    # Bounds-less offline fakes keep the legacy exact-label semantics.
+    assert (
+        session_mod.review_publish_chrome_visible(
+            "<hierarchy><node text='添加图/视频' /><node text='发布' /></hierarchy>"
+        )
+        is True
+    )
+    assert session_mod.review_publish_chrome_visible("<hierarchy/>") is False
+    assert session_mod.review_publish_chrome_visible("") is False
+
+
+def test_shop_page_entry_requires_the_name_in_the_title_band():
+    """shop_page_has_review_entry trusted any occurrence of the shop name:
+    review bodies carry dish and shop names too, so a wrong shop's 写评价
+    could be tapped and the review posted to the wrong shop."""
+    dump = (
+        "<hierarchy>"
+        '<node text="金虹桥商场" bounds="[178,106][705,153]"/>'
+        '<node text="第一次来推荐直接点招牌全家福馄饨" bounds="[141,587][1041,699]"/>'
+        '<node text="发布过3条馄饨|抄手|扁食评价" bounds="[404,1123][770,1156]"/>'
+        '<node text="写评价" bounds="[194,2255][284,2292]"/>'
+        '<node bounds="[0,2355][1080,2400]"/>'
+        "</hierarchy>"
+    )
+    # The real title matches; a dish name that only lives in review bodies
+    # does not.
+    assert session_mod.shop_page_has_review_entry(dump, "金虹桥商场") is True
+    assert session_mod.shop_page_has_review_entry(dump, "馄饨") is False
+
+    # Prefix titles still match (params may lack the paren suffix), and the
+    # name must sit in the top band even then.
+    prefixed = dump.replace("金虹桥商场", "金虹桥商场(娄山关路店)")
+    assert session_mod.shop_page_has_review_entry(prefixed, "金虹桥商场") is True
+
+
+def test_geometry_windows_scale_to_the_dump_device():
+    """uiautomator dumps carry no width/height attribute, so the geometry
+    scale never engaged: on any device bigger than the 1080x2400 reference
+    the filmstrip/photo windows silently matched nothing and the leftover
+    cleanup deleted nothing while reporting success."""
+    tall = (
+        "<hierarchy>"
+        '<node bounds="[0,0][1440,3200]"/>'
+        '<node text="识别菜品" bounds="[49,2339][285,2421]"/>'
+        '<node class="android.widget.FrameLayout" clickable="true" '
+        'bounds="[41,2619][210,2788]">'
+        '<node class="android.widget.ImageView" bounds="[41,2619][210,2788]"/>'
+        "</node>"
+        "</hierarchy>"
+    )
+    rects = session_mod.dish_edit_filmstrip_rects(tall)
+    assert [(r["x"], r["y"]) for r in rects] == [(41, 2619)]
+
+    # The scale only engages once the dump reaches the reference resolution:
+    # miniature fixtures keep the 1080x2400 constants.
+    assert (
+        session_mod.device_geometry_scale(
+            "<hierarchy><node bounds='[10,10][400,80]'/></hierarchy>"
+        )
+        == 1.0
+    )
+    assert (
+        session_mod._screen_height_scale(
+            "<hierarchy><node bounds='[10,10][400,80]'/></hierarchy>"
+        )
+        == 1.0
+    )
+    # Explicit root attributes keep winning.
+    wide = (
+        "<hierarchy width='1440' height='3200'>"
+        "<node bounds='[0,0][1440,3200]'/></hierarchy>"
+    )
+    assert abs(session_mod.device_geometry_scale(wide) - 1440 / 1080.0) < 1e-9
+    assert abs(session_mod._screen_height_scale(wide) - 3200 / 2400.0) < 1e-9
+

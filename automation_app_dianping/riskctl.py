@@ -132,10 +132,13 @@ def vision_channel_from_env() -> Optional[Tuple[str, str, str, float]]:
         config = LlmVisionConfig.from_env()
     except Exception:
         return None
-    endpoint = (getattr(config, "vision_endpoint", "") or "").strip()
-    api_key = (getattr(config, "vision_api_key", "") or "").strip()
-    model = (getattr(config, "vision_model", "") or "").strip()
+    endpoint = (getattr(config, "endpoint", "") or "").strip()
+    api_key = (getattr(config, "api_key", "") or "").strip()
+    model = (getattr(config, "model", "") or "").strip()
     if not (endpoint and model):
         return None
-    timeout = float(getattr(config, "vision_timeout_s", 180.0) or 180.0)
+    try:
+        timeout = float(getattr(config, "timeout_s", 180.0) or 180.0)
+    except (TypeError, ValueError):
+        timeout = 180.0
     return endpoint, api_key, model, timeout
