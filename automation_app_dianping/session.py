@@ -1693,13 +1693,17 @@ _SEARCH_HEADER_RID_TOKENS = ("search_header", "search_view", "search_keyword")
 
 
 def shop_row_tap_rect(source: str, shop_name: str) -> Optional[Dict[str, int]]:
-    """Tap target for the search-result row, never the header query box.
+    """Tap target for the search-result row, never header or summary bands.
 
     The results page keeps the typed query in its search header, so a plain
     ``textContains(shop_name)`` matches the toolbar before any result row and
-    the tap reopens the suggestion page (live 2026-09-23). Skip every match
-    that lives under the search header or is an EditText, and prefer an exact
-    name over a partial one.
+    the tap reopens the suggestion page (live 2026-09-23). The page can also
+    render the name inside an aggregate headline like 「"店名"相关推荐」 with
+    no result row at all (live 2026-11-12, OnePlus 7T: the tap landed on the
+    headline and nothing moved, then the write-CTA wait timed out) — a
+    headline quoting the name with trailing aggregate copy is not a row.
+    Skip every match that lives under the search header, is an EditText, or
+    is such a quoted headline, and prefer an exact name over a partial one.
     """
     name = str(shop_name or "").strip()
     if not source or not name:
@@ -1713,6 +1717,18 @@ def shop_row_tap_rect(source: str, shop_name: str) -> Optional[Dict[str, int]]:
         for child in list(node):
             parent_of[child] = node
 
+    def _headline_not_row(node: ET.Element, text: str) -> bool:
+        stripped = text.strip()
+        if not stripped.startswith(("“", '"', "「", "\u201c")):
+            return False
+        # The headline quotes the name and appends aggregate copy; a real
+        # row label never carries leading quotes (results pages render the
+        # bare shop name, optionally with a branch suffix).
+        tail = stripped
+        for closing in ("”", '"', "」", "\u201d"):
+            tail = tail.split(closing, 1)[0]
+        return name in stripped and not stripped.endswith(name)
+
     def _row_rect(node: ET.Element) -> Optional[Dict[str, int]]:
         chain: List[ET.Element] = []
         current: Optional[ET.Element] = node
@@ -1724,6 +1740,8 @@ def shop_row_tap_rect(source: str, shop_name: str) -> Optional[Dict[str, int]]:
             if any(token in rid for token in _SEARCH_HEADER_RID_TOKENS):
                 return None
         if (node.get("class") or "").endswith("EditText"):
+            return None
+        if _headline_not_row(node, node.get("text") or ""):
             return None
         # Tap the name label, not the clickable card: the card spans the
         # whole entry and its centre lands on a deal tile (live 2026-09-23);

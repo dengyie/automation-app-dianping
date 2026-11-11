@@ -1797,6 +1797,51 @@ def test_shop_row_tap_rect_label_missing_falls_to_clickable_ancestor():
     assert shop_row_tap_rect(bare, "测试店") is None
 
 
+def test_shop_row_tap_rect_rejects_quoted_related_recommend_headline():
+    """Live 2026-11-12 (OnePlus 7T): the results page for a closed/absent
+    shop renders only a 「"店名"相关推荐」 aggregate headline — no result
+    row. The bare-TextView headline passed every header guard and the tap
+    landed on it, the page never moved, and the write-CTA wait timed out.
+    A quoted headline that appends aggregate copy is not a row; the finder
+    must return None so the caller reports failure instead of tapping it.
+    """
+    name = "小杨生煎(百盛优客天山店)"
+    headline = "“%s”相关推荐" % name
+    source = (
+        "<hierarchy>"
+        '<node resource-id="com.dianping.v1:id/search_keyword" text="%s" bounds="[166,90][830,190]"/>'
+        '<node text="%s" bounds="[34,1182][679,1229]"/>'
+        "</hierarchy>" % (name, headline)
+    )
+    assert shop_row_tap_rect(source, name) is None
+
+    # ASCII / corner-bracket quoting variants of the same aggregate headline
+    for quoted in ('"%s"相关推荐' % name, "「%s」相关推荐" % name):
+        src = '<hierarchy><node text="%s" bounds="[34,1182][679,1229]"/></hierarchy>' % quoted
+        assert shop_row_tap_rect(src, name) is None, quoted
+
+    # a real result row carrying the bare name is still found on the same
+    # page, and takes precedence over any headline
+    with_row = (
+        "<hierarchy>"
+        '<node resource-id="com.dianping.v1:id/search_keyword" text="%s" bounds="[166,90][830,190]"/>'
+        '<node text="%s" bounds="[34,600][679,650]"/>'
+        '<node text="%s" bounds="[34,1182][679,1229]"/>'
+        "</hierarchy>" % (name, name, headline)
+    )
+    assert shop_row_tap_rect(with_row, name) == {"x": 34, "y": 600, "width": 645, "height": 50}
+
+    # a row whose own label merely contains the name (branch-qualified card)
+    # still wins over a headline even though the headline is an exact-substring
+    row_contains = (
+        "<hierarchy>"
+        '<node text="“%s”相关推荐" bounds="[34,1182][679,1229]"/>'
+        '<node text="%s 长宁区生煎销量榜第1名" bounds="[34,700][900,750]"/>'
+        "</hierarchy>" % (name, name)
+    )
+    assert shop_row_tap_rect(row_contains, name) == {"x": 34, "y": 700, "width": 866, "height": 50}
+
+
 # --- batch 4: uia2 translated-candidates + tap helpers -----------------------
 
 
