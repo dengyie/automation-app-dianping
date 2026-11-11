@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 from automation_core.drivers import ActionResult, ArtifactHandle, SessionInfo
 
 from automation_app_dianping.config import DianpingDeviceConfig, as_selector_list
+from automation_app_dianping.runlog import RunEventLog, emit, run_log_path
 
 
 class ActionParameterError(ValueError):
@@ -434,6 +435,7 @@ class DianpingAppiumSession:
         artifact_root: Optional[Path] = None,
         slider_solver: Optional[Callable[[Any], Any]] = None,
         captcha_window_seconds: float = 0.0,
+        event_log: Any = None,
     ):
         self.driver = driver
         self.info = SessionInfo(driver_name="appium", platform="android", identifier=identifier)
@@ -447,6 +449,7 @@ class DianpingAppiumSession:
         self.captcha_window_seconds = _coerce_number(
             "captcha_window_seconds", captcha_window_seconds, 0.0, minimum=0.0
         )
+        self.event_log = event_log
         self._started = False
         self._slider_guard_active = False
         self._manual_window_active = False
@@ -481,11 +484,22 @@ class DianpingAppiumSession:
     def execute_action(self, action_name: str, **kwargs: Any) -> ActionResult:
         started = time.time()
         print("[dianping] >> %s" % action_name, flush=True)
+        emit(self.event_log, "action", action=action_name, phase="start")
         result = self._run_action(action_name, kwargs)
         print(
             "[dianping] << %s: %s (%.1fs)"
             % (action_name, "ok" if result.success else "FAIL", time.time() - started),
             flush=True,
+        )
+        emit(
+            self.event_log,
+            "action",
+            action=action_name,
+            phase="end",
+            ok=result.success,
+            message=result.message,
+            seconds=round(time.time() - started, 2),
+            data=result.data if isinstance(result.data, dict) else None,
         )
         return result
 
@@ -1175,11 +1189,20 @@ class DianpingAppiumSession:
         if not source:
             return selector
         kept = []
+        dropped = []
         for candidate in candidates:
             translated = translate_uiautomator_selector(candidate)
             if translated is not None and editor_chrome_hit(source, *translated):
+                dropped.append(candidate)
                 continue
             kept.append(candidate)
+        if dropped:
+            emit(
+                self.event_log,
+                "dismiss_dialogs",
+                outcome="editor chrome dropped",
+                dropped=dropped,
+            )
         return kept
 
 def device_config_from_env(env: Optional[dict] = None, *, base: Optional[DianpingDeviceConfig] = None) -> DianpingDeviceConfig:
@@ -1226,6 +1249,7 @@ def build_session_factory(
     driver_factory: Optional[Callable[[], Any]] = None,
     driver: Optional[str] = None,
     slider_solver: Optional[Callable[[Any], Any]] = None,
+    event_log: Any = None,
 ) -> Callable[[], Any]:
     config = device_config_from_env(env, base=device)
     source = env if env is not None else os.environ
@@ -1233,7 +1257,9 @@ def build_session_factory(
     # for local experiments, never the silent default.
     selected = str(driver or source.get("DIANPING_DRIVER") or "uia2").strip().lower()
     if selected == "uia2":
-        return build_uia2_session_factory(config, slider_solver=slider_solver)
+        return build_uia2_session_factory(
+            config, slider_solver=slider_solver, event_log=event_log
+        )
     if selected != "appium":
         raise ValueError("unsupported dianping driver: %s" % selected)
 
@@ -1246,6 +1272,7 @@ def build_session_factory(
             artifact_root=Path(config.artifact_root),
             slider_solver=slider_solver,
             captcha_window_seconds=config.captcha_window_seconds,
+            event_log=event_log or RunEventLog(run_log_path(config.artifact_root)),
         )
 
     return factory
@@ -1552,6 +1579,22 @@ def _editor_toolbar_label(by: str, value: Any) -> bool:
     if by == "uiautomator" and isinstance(value, dict):
         return value.get("text") in _EDITOR_TOOLBAR_LABELS
     return False
+
+
+def _selector_label(by: str, value: Any) -> str:
+    """Compact selector label for the run log (bounded, never raw XML)."""
+    if by == "uiautomator" and isinstance(value, dict):
+        inner = ",".join(
+            "%s=%s" % (key, value[key])
+            for key in sorted(value)
+            if key != "instance"
+        )
+        label = "uiautomator{%s}" % inner
+    elif isinstance(value, str):
+        label = "%s=%s" % (by, value)
+    else:
+        label = "%s=%r" % (by, value)
+    return label[:200]
 
 
 def clickable_ancestor_rect(
@@ -2336,6 +2379,7 @@ class DianpingUia2Session:
         *,
         captcha_window_seconds: float = 0.0,
         slider_solver: Optional[Callable[[Any], Any]] = None,
+        event_log: Any = None,
     ):
         self._session = kit_session
         self.info = kit_session.info
@@ -2343,6 +2387,7 @@ class DianpingUia2Session:
             "captcha_window_seconds", captcha_window_seconds, 0.0, minimum=0.0
         )
         self.slider_solver = slider_solver
+        self.event_log = event_log
         self._manual_window_active = False
         self._slider_guard_active = False
 
@@ -2370,6 +2415,7 @@ class DianpingUia2Session:
     def execute_action(self, action_name: str, **kwargs: Any) -> ActionResult:
         started = time.time()
         print("[dianping-uia2] >> %s" % action_name, flush=True)
+        emit(self.event_log, "action", action=action_name, phase="start")
         try:
             result = self._run_action(action_name, kwargs)
         except ActionParameterError as exc:
@@ -2386,6 +2432,16 @@ class DianpingUia2Session:
             "[dianping-uia2] << %s: %s (%.1fs)"
             % (action_name, "ok" if result.success else "FAIL", time.time() - started),
             flush=True,
+        )
+        emit(
+            self.event_log,
+            "action",
+            action=action_name,
+            phase="end",
+            ok=result.success,
+            message=result.message,
+            seconds=round(time.time() - started, 2),
+            data=result.data if isinstance(result.data, dict) else None,
         )
         if not result.success:
             print("[dianping-uia2] failure detail: %s" % result.message[:400], flush=True)
@@ -2494,6 +2550,12 @@ class DianpingUia2Session:
 
         channel = riskctl.vision_channel_from_env()
         if channel is None:
+            emit(
+                self.event_log,
+                "point_select",
+                popup=list(popup),
+                outcome="vision channel not configured",
+            )
             return ActionResult(
                 False,
                 "vision channel not configured (SLIDEX_VISION_*) for the "
@@ -2515,6 +2577,13 @@ class DianpingUia2Session:
             buffer = io.BytesIO()
             popup_png.save(buffer, format="PNG")
         except Exception as exc:
+            emit(
+                self.event_log,
+                "point_select",
+                popup=list(popup),
+                outcome="popup capture failed",
+                message=str(exc),
+            )
             return ActionResult(False, "popup capture failed: %s" % exc)
         targets = riskctl.locate_point_select_targets(
             buffer.getvalue(),
@@ -2524,6 +2593,12 @@ class DianpingUia2Session:
             timeout_s=timeout,
         )
         if not targets:
+            emit(
+                self.event_log,
+                "point_select",
+                popup=list(popup),
+                outcome="vision returned no usable targets",
+            )
             return ActionResult(
                 False, "vision channel returned no usable icon targets"
             )
@@ -2531,6 +2606,7 @@ class DianpingUia2Session:
         if not callable(click):
             return ActionResult(False, "driver does not support coordinate click")
         popup_w, popup_h = x2 - x1, y2 - y1
+        clicks = []
         for label, nx, ny, _conf in targets:
             jitter_x = random.randint(-3, 3)
             jitter_y = random.randint(-3, 3)
@@ -2539,7 +2615,16 @@ class DianpingUia2Session:
             try:
                 click(dx, dy)
             except Exception as exc:
+                emit(
+                    self.event_log,
+                    "point_select",
+                    popup=list(popup),
+                    outcome="click failed",
+                    label=label,
+                    message=str(exc),
+                )
                 return ActionResult(False, "click %s failed: %s" % (label, exc))
+            clicks.append([label, dx, dy])
             print(
                 "[dianping-uia2] point-select: clicked %s at (%d, %d)" % (label, dx, dy),
                 flush=True,
@@ -2547,7 +2632,21 @@ class DianpingUia2Session:
             time.sleep(random.uniform(0.4, 0.9))
         time.sleep(2.0)
         if page_source_indicates_point_select(self._hierarchy_source()):
+            emit(
+                self.event_log,
+                "point_select",
+                popup=list(popup),
+                clicks=clicks,
+                outcome="popup still present after clicks",
+            )
             return ActionResult(False, "challenge popup still present after clicks")
+        emit(
+            self.event_log,
+            "point_select",
+            popup=list(popup),
+            clicks=clicks,
+            outcome="cleared",
+        )
         return ActionResult(True, "clicked %d icon(s) in hint order" % len(targets))
 
     def _guard_slider(self, action_name: str, result: ActionResult, kwargs: Dict[str, Any]) -> ActionResult:
@@ -2630,6 +2729,7 @@ class DianpingUia2Session:
     ) -> ActionResult:
         handle = locate_slider_handle(self._hierarchy_source())
         if handle is None:
+            emit(self.event_log, "slider_swipe", outcome="handle not located")
             return ActionResult(False, "slider handle not located in page source")
         driver = getattr(self._session, "driver", None)
         swipe = getattr(driver, "swipe", None) if driver is not None else None
@@ -2637,13 +2737,38 @@ class DianpingUia2Session:
             return ActionResult(False, "driver does not support coordinate swipe")
         distance, error = _slider_drag_distance(handle[0], gap_x, offset_px, scale)
         if error is not None:
+            emit(
+                self.event_log,
+                "slider_swipe",
+                handle=list(handle),
+                gap_x=gap_x,
+                offset_px=offset_px,
+                outcome="invalid drag distance",
+                message=error.message,
+            )
             return error
         start_x, start_y = handle
         try:
             # u2's swipe duration is in seconds, not Appium's milliseconds.
             swipe(int(start_x), int(start_y), int(start_x + distance), int(start_y), 0.6)
         except Exception as exc:
+            emit(
+                self.event_log,
+                "slider_swipe",
+                handle=list(handle),
+                distance=distance,
+                outcome="swipe failed",
+                message=str(exc),
+            )
             return ActionResult(False, "slider swipe failed: %s" % exc)
+        emit(
+            self.event_log,
+            "slider_swipe",
+            handle=list(handle),
+            gap_x=gap_x,
+            distance=distance,
+            outcome="swiped",
+        )
         return ActionResult(True, "slider swiped %d px" % distance)
 
     def _with_translated_candidates(
@@ -2858,10 +2983,13 @@ class DianpingUia2Session:
                 False, "navigate_to_review_editor: empty hierarchy after wake"
             )
         if dish_edit_is_open(source):
+            emit(self.event_log, "navigate", outcome="already in dish-edit")
             return ActionResult(True, "navigate_to_review_editor already in dish-edit")
         if review_editor_is_open(source):
+            emit(self.event_log, "navigate", outcome="already in review editor")
             return ActionResult(True, "navigate_to_review_editor already in review editor")
         if shop_page_has_review_entry(source, shop_name):
+            emit(self.event_log, "navigate", outcome="restored shop page; tapping write CTA")
             tap = self._tap_with_clickable_parent({"selector": write_selector})
             if tap.success:
                 return ActionResult(
@@ -3147,9 +3275,11 @@ class DianpingUia2Session:
         itself (live 2026-10-17: UiTestAutomationBridge intermittently
         returned a null root over wireless debugging).
         """
-        for _ in range(2):
+        for attempt in range(2):
             source = self._hierarchy_source()
             if not source:
+                emit(self.event_log, "back_unwind", attempt=attempt + 1,
+                     outcome="hierarchy unreadable; refusing blind BACK")
                 return ActionResult(
                     False, "hierarchy unreadable; refusing blind BACK"
                 )
@@ -3158,12 +3288,25 @@ class DianpingUia2Session:
                 or dish_edit_is_open(source)
                 or review_publish_chrome_visible(source)
             ):
+                emit(
+                    self.event_log,
+                    "back_unwind",
+                    attempt=attempt + 1,
+                    outcome="refused; editor chrome visible",
+                    editor=review_editor_is_open(source),
+                    dish_edit=dish_edit_is_open(source),
+                    publish_chrome=review_publish_chrome_visible(source),
+                )
                 return ActionResult(
                     False, "refusing BACK with editor chrome visible"
                 )
             self._press_back_quietly()
             if self._marker_present_now(kwargs.get("search_bar")):
+                emit(self.event_log, "back_unwind", attempt=attempt + 1,
+                     outcome="home search bar reached")
                 return ActionResult(True, "home search bar present after BACK")
+            emit(self.event_log, "back_unwind", attempt=attempt + 1,
+                 outcome="search bar not present after BACK")
         return ActionResult(False, "home search bar not reached via BACK")
 
     def _results_page_open(
@@ -3377,6 +3520,13 @@ class DianpingUia2Session:
     def _rate(self, **kwargs: Any) -> ActionResult:
         source = self._hierarchy_source()
         if should_skip_rating(source):
+            emit(
+                self.event_log,
+                "rate",
+                dimension=kwargs.get("dimension"),
+                value=kwargs.get("value"),
+                outcome="skipped; overall bar not on overwrite chrome",
+            )
             return ActionResult(
                 True,
                 "rate skipped; overall bar not on overwrite chrome",
@@ -3406,8 +3556,25 @@ class DianpingUia2Session:
                     source = self._hierarchy_source()
                     stars = overall_star_row_rects(source)
             if len(stars) < numeric_value:
+                emit(
+                    self.event_log,
+                    "rate",
+                    anchor="overall",
+                    value=numeric_value,
+                    outcome="overall rating bar not found",
+                    stars_found=len(stars),
+                )
                 return ActionResult(False, "overall rating bar not found on uia2")
             x, y = stars[numeric_value - 1]
+            emit(
+                self.event_log,
+                "rate",
+                anchor="overall",
+                value=numeric_value,
+                outcome="star tap",
+                stars_found=len(stars),
+                point=[x, y],
+            )
             try:
                 result = self._session.execute_action(
                     "swipe",
@@ -3431,6 +3598,14 @@ class DianpingUia2Session:
         label_rect = self._label_rect_from_source(candidates, source)
         if label_rect is None:
             if not editor_has_dimension_rows(source):
+                emit(
+                    self.event_log,
+                    "rate",
+                    anchor="dimension_row",
+                    dimension=kwargs.get("dimension"),
+                    value=numeric_value,
+                    outcome="skipped; editor has no dimension row",
+                )
                 return ActionResult(
                     True,
                     "dimension rate skipped; editor has no %s row"
@@ -3440,6 +3615,14 @@ class DianpingUia2Session:
                         "value": kwargs.get("value"),
                     },
                 )
+            emit(
+                self.event_log,
+                "rate",
+                anchor="dimension_row",
+                dimension=kwargs.get("dimension"),
+                value=numeric_value,
+                outcome="dimension rating label not found",
+            )
             return ActionResult(False, "dimension rating label not found on uia2")
         stars = dimension_star_row_rects(source, label_rect)
         if len(stars) >= numeric_value:
@@ -3459,6 +3642,17 @@ class DianpingUia2Session:
                 * scale
             )
             y = int(label_rect["y"] + label_rect["height"] / 2)
+        emit(
+            self.event_log,
+            "rate",
+            anchor="dimension_row",
+            dimension=kwargs.get("dimension"),
+            value=numeric_value,
+            outcome="star tap",
+            stars_found=len(stars),
+            point=[x, y],
+            source="dump strip" if len(stars) >= numeric_value else "measured constants",
+        )
         try:
             result = self._session.execute_action(
                 "swipe",
@@ -4473,7 +4667,9 @@ class DianpingUia2Session:
         return present
 
     def _dismiss_dialogs(self, **kwargs: Any) -> ActionResult:
-        if dish_edit_is_open(self._hierarchy_source()):
+        source = self._hierarchy_source()
+        if dish_edit_is_open(source):
+            emit(self.event_log, "dismiss_dialogs", outcome="skipped; dish-edit open")
             return ActionResult(True, "dismiss_dialogs skipped; dish-edit open")
         selector = kwargs.get("selector")
         max_attempts = _numeric_parameter(kwargs, "max_attempts", 3, cast=int, minimum=1)
@@ -4483,7 +4679,7 @@ class DianpingUia2Session:
             if translated is not None:
                 candidates.append(translated)
         dismissed = 0
-        for _ in range(max_attempts):
+        for attempt in range(max_attempts):
             # Re-dump every round: a successful tap changes the screen, so
             # the next round must see the tree that is actually up now.
             present = self._present_candidates(candidates)
@@ -4492,6 +4688,12 @@ class DianpingUia2Session:
                 # burns the kit's implicit wait per missing candidate (~8s
                 # each, ~48s per launch with no dialog on screen -- live
                 # 2026-11-09). Nothing to dismiss this round.
+                emit(
+                    self.event_log,
+                    "dismiss_dialogs",
+                    attempt=attempt + 1,
+                    outcome="nothing on screen",
+                )
                 break
             if present is None:
                 # The dump channel is wedged: no tree to prove which node a
@@ -4503,6 +4705,17 @@ class DianpingUia2Session:
                     for by, value in candidates
                     if not _editor_toolbar_label(by, value)
                 ]
+                emit(
+                    self.event_log,
+                    "dismiss_dialogs",
+                    attempt=attempt + 1,
+                    outcome="dump unreadable; blind path",
+                    blind_excluded=[
+                        _selector_label(by, value)
+                        for by, value in candidates
+                        if _editor_toolbar_label(by, value)
+                    ],
+                )
                 if not present:
                     break
             hit = False
@@ -4511,8 +4724,24 @@ class DianpingUia2Session:
                 if result.success:
                     dismissed += 1
                     hit = True
+                    emit(
+                        self.event_log,
+                        "dismiss_dialogs",
+                        attempt=attempt + 1,
+                        outcome="tapped",
+                        candidate=_selector_label(by, value),
+                    )
                     break
             if not hit:
+                emit(
+                    self.event_log,
+                    "dismiss_dialogs",
+                    attempt=attempt + 1,
+                    outcome="tap failed for every present candidate",
+                    present=[
+                        _selector_label(by, value) for by, value in present
+                    ],
+                )
                 break
         # Best-effort hygiene, mirroring the Appium session: success even
         # when no dialog was present.
@@ -4540,6 +4769,7 @@ def build_uia2_session_factory(
     config: DianpingDeviceConfig,
     *,
     slider_solver: Optional[Callable[[Any], Any]] = None,
+    event_log: Any = None,
 ) -> Callable[[], DianpingUia2Session]:
     """Zero-arg factory connecting over adb directly (no Appium server)."""
 
@@ -4563,6 +4793,10 @@ def build_uia2_session_factory(
             ),
             captcha_window_seconds=config.captcha_window_seconds,
             slider_solver=slider_solver,
+            # One JSONL event log per run, next to the run's screenshots and
+            # page dumps: the post-run analysis reads decisions from it
+            # instead of re-deriving them from raw dumps.
+            event_log=event_log or RunEventLog(run_log_path(config.artifact_root)),
         )
 
     return factory

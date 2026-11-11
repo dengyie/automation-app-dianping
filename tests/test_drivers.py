@@ -285,13 +285,16 @@ def test_create_appium_driver_preserves_explicit_base_path(monkeypatch):
     assert captured["url"] == "http://127.0.0.1:4723/wd/hub"
 
 
-def test_uia2_launch_app_rejects_non_numeric_settle(monkeypatch):
+def test_uia2_launch_app_rejects_non_numeric_settle(monkeypatch, tmp_path):
     import automation_app_dianping.session as session_module
 
     monkeypatch.setattr(session_module, "_import_kit_uia2_session", lambda: FakeKitSession)
     monkeypatch.setattr(session_module, "_connect_uia2", lambda udid: FakeU2Device())
 
-    session = session_module.build_uia2_session_factory(DianpingDeviceConfig())()
+    # Isolated artifact root: the factory wires a per-run event log, and the
+    # test must not drop one into the repo's real artifacts directory.
+    config = DianpingDeviceConfig(artifact_root=str(tmp_path / "artifacts"))
+    session = session_module.build_uia2_session_factory(config)()
 
     result = session.execute_action("launch_app", app_id="com.dianping.v1", settle_seconds="soon")
 
