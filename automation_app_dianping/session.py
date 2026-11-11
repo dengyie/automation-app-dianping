@@ -1723,10 +1723,8 @@ def shop_row_tap_rect(source: str, shop_name: str) -> Optional[Dict[str, int]]:
             return False
         # The headline quotes the name and appends aggregate copy; a real
         # row label never carries leading quotes (results pages render the
-        # bare shop name, optionally with a branch suffix).
-        tail = stripped
-        for closing in ("”", '"', "」", "\u201d"):
-            tail = tail.split(closing, 1)[0]
+        # bare shop name, optionally with a branch suffix). An exact match
+        # on a legitimately quote-named shop ends with the name and passes.
         return name in stripped and not stripped.endswith(name)
 
     def _row_rect(node: ET.Element) -> Optional[Dict[str, int]]:
