@@ -181,6 +181,29 @@ _SLIDER_HANDLE_HINTS = ("滑块", "slider", "拖动", "handle")
 # puzzleSliderMoveingBar/puzzleSliderBox with no text or content-desc, so the
 # text/desc hints above never match. Structural id hints cover that channel.
 _SLIDER_HANDLE_ID_HINTS = ("slider", "puzzle", "captcha")
+# The jigsaw's own handle nodes, most specific first (live dump
+# fail-navigate_to_review_editor-1794167161.xml). They must outrank the
+# generic hint fallback: the challenge chrome shares the same id substrings
+# and PRECEDES its children in document order -- puzzleSliderContainer spans
+# the whole popup, so "first node whose id contains slider" returned the
+# popup's centre (540,1211) and the drag started in the middle of the puzzle
+# picture instead of on the handle (158,1564).
+_SLIDER_HANDLE_PREFERRED_IDS = (
+    "puzzleslidermoveingbar",
+    "puzzlesliderbox",
+    "puzzlesliderdrag",
+)
+# Challenge chrome that carries the same hint substrings but is never the
+# draggable handle. Only consulted on the generic fallback.
+_SLIDER_HANDLE_CHROME_ID_PARTS = (
+    "container",
+    "title",
+    "image",
+    "wrap",
+    "refresh",
+    "background",
+    "mask",
+)
 _BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 
 # Latin markers only count inside structural attributes: H5 pages carry
@@ -239,29 +262,50 @@ def page_source_indicates_slider(source: str) -> bool:
 def locate_slider_handle(source: str) -> Optional[Tuple[int, int]]:
     """Best-effort slider handle position from a page source dump.
 
-    Returns the center of the first node whose text/content-desc looks like
-    a slider handle and whose bounds are parseable, else None.
+    Returns the centre of the draggable handle, else None. Known jigsaw
+    handle ids win over the generic hint scan (the challenge chrome shares
+    the same id substrings and precedes its children in document order, so
+    the old first-match scan landed on the popup container); the generic
+    scan then skips chrome-shaped ids, keeping them only as a last resort.
     """
     try:
         root = ET.fromstring(source)
     except ET.ParseError:
         return None
+    best_preferred: Optional[Tuple[int, Tuple[int, int]]] = None
+    fallback: Optional[Tuple[int, int]] = None
+    chrome_fallback: Optional[Tuple[int, int]] = None
     for node in root.iter("node"):
         text = (node.get("text") or "").strip().lower()
         desc = (node.get("content-desc") or "").strip().lower()
         rid = (node.get("resource-id") or "").strip().lower()
-        if not any(
-            hint in text or hint in desc or hint in rid
-            for hint in _SLIDER_HANDLE_HINTS
-        ) and not any(hint in rid for hint in _SLIDER_HANDLE_ID_HINTS):
-            continue
         match = _BOUNDS_RE.match(node.get("bounds") or "")
         if match is None:
             continue
         x1, y1, x2, y2 = (int(part) for part in match.groups())
-        if x2 > x1 and y2 > y1:
-            return ((x1 + x2) // 2, (y1 + y2) // 2)
-    return None
+        if not (x2 > x1 and y2 > y1):
+            continue
+        centre = ((x1 + x2) // 2, (y1 + y2) // 2)
+        for rank, handle_id in enumerate(_SLIDER_HANDLE_PREFERRED_IDS):
+            if handle_id in rid:
+                if best_preferred is None or rank < best_preferred[0]:
+                    best_preferred = (rank, centre)
+                break
+        hinted = any(
+            hint in text or hint in desc or hint in rid
+            for hint in _SLIDER_HANDLE_HINTS
+        ) or any(hint in rid for hint in _SLIDER_HANDLE_ID_HINTS)
+        if not hinted:
+            continue
+        if any(part in rid for part in _SLIDER_HANDLE_CHROME_ID_PARTS):
+            if chrome_fallback is None:
+                chrome_fallback = centre
+            continue
+        if fallback is None:
+            fallback = centre
+    if best_preferred is not None:
+        return best_preferred[1]
+    return fallback if fallback is not None else chrome_fallback
 
 
 def slider_challenge_cleared(read_source: Callable[[], str], *, attempts: int = 3) -> bool:
@@ -1167,6 +1211,10 @@ def device_config_from_env(env: Optional[dict] = None, *, base: Optional[Dianpin
         no_reset=no_reset_raw in {"1", "true", "yes", "on"},
         auto_grant_permissions=base.auto_grant_permissions,
         new_command_timeout=base.new_command_timeout,
+        # The CLI's --captcha-window lands on the caller-built config; the
+        # rebuild used to drop it, silently disabling the manual-recovery
+        # window (the guarded retry loop never armed).
+        captcha_window_seconds=base.captcha_window_seconds,
         artifact_root=_get("DIANPING_ARTIFACT_ROOT", base.artifact_root) or base.artifact_root,
     )
 
@@ -1348,6 +1396,13 @@ def editor_attached_photo_rects(source: str) -> List[Dict[str, int]]:
 
     seen = set()
     rects: List[Dict[str, int]] = []
+    # The y-window and thumbnail sizes were measured on the 1080x2400 test
+    # device; a taller device renders the same chrome lower down and bigger,
+    # so a hardcoded window silently matched nothing and the leftover-photo
+    # cleanup reported success while deleting nothing.
+    scale = _screen_height_scale(source)
+    min_side, max_side = 80 * scale, 400 * scale
+    window_top, window_bottom = 400 * scale, 2000 * scale
     for node in root.iter("node"):
         text = (node.get("text") or "").strip()
         if not text.isdigit():
@@ -1361,9 +1416,9 @@ def editor_attached_photo_rects(source: str) -> List[Dict[str, int]]:
         rect = _bounds_rect(host.get("bounds") or "")
         if rect is None:
             continue
-        if not (80 <= rect["width"] <= 400 and 80 <= rect["height"] <= 400):
+        if not (min_side <= rect["width"] <= max_side and min_side <= rect["height"] <= max_side):
             continue
-        if not (400 <= rect["y"] <= 2000):
+        if not (window_top <= rect["y"] <= window_bottom):
             continue
         key = (rect["x"], rect["y"], rect["width"], rect["height"])
         if key in seen:
@@ -1651,14 +1706,45 @@ def shop_row_tap_rect(source: str, shop_name: str) -> Optional[Dict[str, int]]:
 
 
 def shop_page_has_review_entry(source: str, shop_name: str) -> bool:
-    """True when the restored shop page already shows a review CTA."""
+    """True when the restored shop page already shows a review CTA.
+
+    The name must sit in the page's title band, not merely anywhere in the
+    dump: review bodies carry shop and dish names too (live 2026-11-10 shop
+    page for 金虹桥商场 carries 「发布过3条馄饨|抄手|扁食评价」 in a reviewer
+    badge, so any-occurrence matching routed the write tap to a wrong
+    shop's editor). The title is the topmost name-bearing text node, and a
+    real title sits in the top fifth of the page.
+    """
     if not source or not shop_name:
         return False
-    if shop_name not in source:
-        return False
-    return any(
+    if not any(
         label in source for label in ("完善评价", "编辑评价", "写评价")
-    )
+    ):
+        return False
+    root = _hierarchy_root(source)
+    if root is None:
+        return False
+    page_bottom = 0
+    title_found = False
+    title_rect: Optional[Dict[str, int]] = None
+    for node in root.iter("node"):
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is not None:
+            page_bottom = max(page_bottom, rect["y"] + rect["height"])
+        text = (node.get("text") or "").strip()
+        if not text:
+            continue
+        if text == shop_name or text.startswith(shop_name):
+            if not title_found:
+                title_found = True
+                title_rect = rect
+    if not title_found:
+        return False
+    if title_rect is None or not _dump_covers_screen(source):
+        # Bounds-less or partial dump: the name-shaped hit is the only
+        # evidence available.
+        return True
+    return title_rect["y"] <= page_bottom * 0.2
 
 
 _PENDING_CTA_LABELS = ("评价", "写评价", "评价订单")
@@ -1792,6 +1878,9 @@ _DIMENSION_STAR_ROW_Y_TOLERANCE_PX = 45.0
 # (OnePlus 7T). Dumps carry the real screen width on the <hierarchy> root,
 # so pixel tolerances scale with it instead of silently assuming 1080px.
 _GEOMETRY_REFERENCE_WIDTH_PX = 1080.0
+# The editor/filmstrip y-windows were measured on the same device's 2400px
+# screen; they scale by the dump's height the same way.
+_GEOMETRY_REFERENCE_HEIGHT_PX = 2400.0
 
 
 def _hierarchy_root(source: str) -> Optional[ET.Element]:
@@ -1804,6 +1893,28 @@ def _hierarchy_root(source: str) -> Optional[ET.Element]:
         return None
 
 
+def _dump_covers_screen(source: str) -> bool:
+    """True when the dump looks like a real full-screen capture.
+
+    Real window dumps are portrait (the deepest edge reaches at least the
+    widest edge) and include the status bar; miniature test fixtures and
+    dialog-only captures do not. The position-sensitive checks (the editor's
+    bottom-bar 发布, the shop-page title band) only mean something on a real
+    screen — on a partial dump the exact label match itself is the evidence.
+    """
+    root = _hierarchy_root(source)
+    if root is None:
+        return False
+    widest = deepest = 0
+    for node in root.iter("node"):
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is None:
+            continue
+        widest = max(widest, rect["x"] + rect["width"])
+        deepest = max(deepest, rect["y"] + rect["height"])
+    return deepest > 0 and deepest >= widest
+
+
 def _screen_width_from_source(source: str) -> Optional[int]:
     root = _hierarchy_root(source)
     if root is None:
@@ -1811,8 +1922,47 @@ def _screen_width_from_source(source: str) -> Optional[int]:
     try:
         width = int(root.get("width") or "")
     except (TypeError, ValueError):
-        return None
-    return width or None
+        width = 0
+    if width:
+        return width or None
+    # uiautomator dumps carry no width attribute (only rotation); the widest
+    # node edge is the screen's right edge -- the status-bar chrome always
+    # spans it. Trusted only when it reaches the reference width, so narrow
+    # partial dumps (dialogs, test fixtures) keep the 1.0 scale instead of
+    # silently shrinking the measured tolerances.
+    widest = 0
+    for node in root.iter("node"):
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is not None:
+            widest = max(widest, rect["x"] + rect["width"])
+    return widest if widest >= _GEOMETRY_REFERENCE_WIDTH_PX else None
+
+
+def _screen_height_scale(source: str) -> float:
+    """Vertical scale for measured y-windows (1.0 at 2400px height).
+
+    Same evidence rule as the width: an explicit root attribute wins, else
+    the deepest node edge, trusted only once it reaches the reference
+    height -- the measured editor/filmstrip windows were taken on the
+    1080x2400 test device and must not move for smaller partial dumps.
+    """
+    root = _hierarchy_root(source)
+    if root is None:
+        return 1.0
+    try:
+        height = int(root.get("height") or "")
+    except (TypeError, ValueError):
+        height = 0
+    if height:
+        return height / _GEOMETRY_REFERENCE_HEIGHT_PX
+    deepest = 0
+    for node in root.iter("node"):
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is not None:
+            deepest = max(deepest, rect["y"] + rect["height"])
+    if deepest < _GEOMETRY_REFERENCE_HEIGHT_PX:
+        return 1.0
+    return deepest / _GEOMETRY_REFERENCE_HEIGHT_PX
 
 
 def device_geometry_scale(source: str) -> float:
@@ -1868,6 +2018,41 @@ def _row_groups(
     return groups
 
 
+def _overall_caption_band_bottom(root: ET.Element) -> int:
+    """Bottom edge of the overall caption row (很糟糕..超预期), 0 when absent.
+
+    The same labels also render as the dimension rows' current-value chips
+    (口味:超预期 sits at y~584 on the 2026-11 editor, below the real caption
+    line at y~346). Taking the max over every label pushed caption_bottom
+    under the dimension strips and left the overall star row with no
+    candidate window at all (overall_star_row_rects returned () on every
+    2026-11 editor dump). The caption row is the y-band holding the MOST
+    distinct labels -- five captions share one line, a chip row holds one.
+    """
+    labels: List[Tuple[Dict[str, int], str]] = []
+    for node in root.iter("node"):
+        text = (node.get("text") or "").strip()
+        if text not in _OVERALL_RATING_LABELS:
+            continue
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is not None:
+            labels.append((rect, text))
+    if not labels:
+        return 0
+    bands: List[Tuple[int, List[Tuple[Dict[str, int], str]]]] = []
+    for rect, text in labels:
+        for band in bands:
+            if abs(rect["y"] - band[0]) <= max(rect["height"], 8):
+                band[1].append((rect, text))
+                break
+        else:
+            bands.append((rect["y"], [(rect, text)]))
+    caption_band = max(
+        bands, key=lambda band: (len({text for _, text in band[1]}), -band[0])
+    )
+    return max(rect["y"] + rect["height"] for rect, _ in caption_band[1])
+
+
 def overall_star_row_rects(source: str) -> Tuple[Tuple[int, int], ...]:
     """(x, y) centres of the overall star row, left to right.
 
@@ -1877,13 +2062,7 @@ def overall_star_row_rects(source: str) -> Tuple[Tuple[int, int], ...]:
     root = _hierarchy_root(source)
     if root is None:
         return ()
-    caption_bottom = 0
-    for node in root.iter("node"):
-        if (node.get("text") or "").strip() not in _OVERALL_RATING_LABELS:
-            continue
-        rect = _bounds_rect(node.get("bounds") or "")
-        if rect is not None:
-            caption_bottom = max(caption_bottom, rect["y"] + rect["height"])
+    caption_bottom = _overall_caption_band_bottom(root)
     if caption_bottom <= 0:
         return ()
     scale = device_geometry_scale(source)
@@ -1928,8 +2107,37 @@ def dimension_star_row_rects(
 
 
 def review_publish_chrome_visible(source: str) -> bool:
-    """True when the editor bottom bar already shows 发布."""
-    return bool(source) and "发布" in source
+    """True when the editor bottom bar already shows 发布.
+
+    Structural, not substring: review bodies and shop-page badges carry the
+    word 发布 too (live 2026-11-10 shop page: 「发布过3条馄饨|抄手|扁食评价」
+    made every shop page look like the editor and froze the BACK unwind at
+    'refusing BACK with editor chrome visible'). The editor's own publish
+    control is an exact-text 发布 node pinned to the bottom bar; when the
+    dump carries no geometry at all (offline fakes) the exact label is all
+    the evidence there is.
+    """
+    root = _hierarchy_root(source)
+    if root is None:
+        return False
+    page_bottom = 0
+    publish_label = False
+    publish_rect: Optional[Dict[str, int]] = None
+    for node in root.iter("node"):
+        rect = _bounds_rect(node.get("bounds") or "")
+        if rect is not None:
+            page_bottom = max(page_bottom, rect["y"] + rect["height"])
+        if (node.get("text") or "").strip() == "发布":
+            publish_label = True
+            if rect is not None and publish_rect is None:
+                publish_rect = rect
+    if not publish_label:
+        return False
+    if publish_rect is None or not _dump_covers_screen(source):
+        # Bounds-less or partial dump: the exact label is all the evidence
+        # there is.
+        return True
+    return publish_rect["y"] + publish_rect["height"] >= page_bottom * 0.6
 
 
 def review_ime_toolbar_visible(source: str) -> bool:
@@ -1972,6 +2180,13 @@ def dish_edit_filmstrip_rects(source: str) -> List[Dict[str, int]]:
         return []
     rects: List[Dict[str, int]] = []
     seen = set()
+    # The filmstrip window and thumbnail sizes were measured on the
+    # 1080x2400 test device; a taller device renders the strip lower and
+    # the thumbnails bigger, so the hardcoded window silently matched
+    # nothing and the cleanup deleted nothing while reporting success.
+    scale = _screen_height_scale(source)
+    window_top, window_bottom = 1880 * scale, 2160 * scale
+    min_side, max_side = 80 * scale, 180 * scale
     for node in root.iter("node"):
         if (node.get("clickable") or "").lower() != "true":
             continue
@@ -1980,9 +2195,9 @@ def dish_edit_filmstrip_rects(source: str) -> List[Dict[str, int]]:
         rect = _bounds_rect(node.get("bounds") or "")
         if rect is None:
             continue
-        if not (1880 <= rect["y"] <= 2160):
+        if not (window_top <= rect["y"] <= window_bottom):
             continue
-        if not (80 <= rect["width"] <= 180 and 80 <= rect["height"] <= 180):
+        if not (min_side <= rect["width"] <= max_side and min_side <= rect["height"] <= max_side):
             continue
         key = (rect["x"], rect["y"], rect["width"], rect["height"])
         if key in seen:
