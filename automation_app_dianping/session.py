@@ -1100,7 +1100,9 @@ class DianpingAppiumSession:
             result = self._with_selector_fallbacks(
                 "tap",
                 {
-                    "selector": selector,
+                    "selector": self._dialog_candidates_excluding_editor_chrome(
+                        selector
+                    ),
                     "timeout": _numeric_parameter(kwargs, "timeout", 1.0, minimum=0.0),
                 },
             )
@@ -1110,6 +1112,31 @@ class DianpingAppiumSession:
             time.sleep(0.2)
         # Success even if nothing to dismiss - this is best-effort hygiene.
         return ActionResult(True, "dismiss_dialogs", data={"dismissed": dismissed})
+
+    def _dialog_candidates_excluding_editor_chrome(
+        self, selector: Any
+    ) -> Any:
+        """Drop dialog candidates that only match the review editor's chrome.
+
+        The editor toolbar carries its own 取消 / 确定 buttons; tapping them
+        while dismissing dialogs discards the draft instead of closing a
+        dialog (2026-11-11 offline review). Candidates with no match on
+        screen are kept: this path has no probe-first dump, so an absent
+        label is not evidence of anything.
+        """
+        candidates = as_selector_list(selector) if selector is not None else []
+        if not candidates:
+            return selector
+        source = self._appium_page_source()
+        if not source:
+            return selector
+        kept = []
+        for candidate in candidates:
+            translated = translate_uiautomator_selector(candidate)
+            if translated is not None and editor_chrome_hit(source, *translated):
+                continue
+            kept.append(candidate)
+        return kept
 
 def device_config_from_env(env: Optional[dict] = None, *, base: Optional[DianpingDeviceConfig] = None) -> DianpingDeviceConfig:
     source = env if env is not None else os.environ
@@ -1397,6 +1424,78 @@ def _node_matches_selector(node: ET.Element, by: str, value: Any) -> bool:
         return rid == value
     if by == "class":
         return cls == value
+    return False
+
+
+# The Picasso review editor's own root id. Everything under it is the
+# editor's own chrome (its 取消 / 确定 toolbar buttons), not a dialog that
+# happens to be on screen.
+_PICASSO_EDITOR_ROOT_ID = "com.dianping.v1:id/picasso_view"
+
+
+def _node_inside_picasso_editor(node: ET.Element, parent_of: Dict) -> bool:
+    """True when the node sits under the Picasso review editor root."""
+    current: Optional[ET.Element] = node
+    while current is not None:
+        if current.get("resource-id") == _PICASSO_EDITOR_ROOT_ID:
+            return True
+        current = parent_of.get(current)
+    return False
+
+
+def _editor_chrome_only_match(root: ET.Element, by: str, value: Any) -> bool:
+    """True when the selector matches ONLY nodes inside the editor root."""
+    parent_of: Dict[ET.Element, ET.Element] = {}
+    for node in root.iter():
+        for child in list(node):
+            parent_of[child] = node
+    matched = False
+    for node in root.iter("node"):
+        if not _node_matches_selector(node, by, value):
+            continue
+        matched = True
+        if not _node_inside_picasso_editor(node, parent_of):
+            return False
+    return matched
+
+
+def editor_chrome_hit(source: str, by: str, value: Any) -> bool:
+    """True when the selector matches ONLY the review editor's own chrome.
+
+    2026-11-11 offline review: ``dialog_dismiss`` carries 取消 because a
+    dialog button may read that. The review editor's toolbar has a 取消
+    button of its own, and every captured dump shows it under
+    ``com.dianping.v1:id/picasso_view``. Tapping it discards the draft the
+    workflow is about to fill in, while the step reports "dismissed".
+
+    The check is deliberately narrow: it fires only when the selector has
+    at least one match and EVERY match is editor chrome. A real dialog
+    that happens to share the label (or lives outside the editor, like the
+    「暂不查看」 leftover-review modal under ``stimulate_layout``) still
+    matches outside the editor and is dismissed as before.
+    """
+    if not source:
+        return False
+    try:
+        root = ET.fromstring(source)
+    except (ET.ParseError, TypeError):
+        return False
+    return _editor_chrome_only_match(root, by, value)
+
+
+# Labels the editor toolbar owns. They are legitimate dialog-button texts
+# too, so a dismissal sweep may hit them — but never while the editor is
+# open. Used for the blind-tap path, where no tree is available to prove
+# which node a selector would reach.
+_EDITOR_TOOLBAR_LABELS = ("取消", "确定")
+
+
+def _editor_toolbar_label(by: str, value: Any) -> bool:
+    """True when the candidate addresses a label the editor toolbar owns."""
+    if by == "text":
+        return str(value) in _EDITOR_TOOLBAR_LABELS
+    if by == "uiautomator" and isinstance(value, dict):
+        return value.get("text") in _EDITOR_TOOLBAR_LABELS
     return False
 
 
@@ -4136,7 +4235,12 @@ class DianpingUia2Session:
     def _present_candidates(self, candidates: Any) -> Optional[list]:
         """(by, value) pairs actually on screen, or None when the hierarchy
         is unavailable/unparseable (the caller then falls back to blind taps
-        so a wedged dump channel cannot silently skip real dialogs)."""
+        so a wedged dump channel cannot silently skip real dialogs).
+
+        Candidates that match ONLY the review editor's own chrome are
+        dropped: the editor toolbar carries a 取消 / 确定 button of its
+        own, and tapping them while "dismissing dialogs" throws away the
+        draft the workflow is about to fill in."""
         source = self._hierarchy_source()
         if not source:
             return None
@@ -4144,11 +4248,14 @@ class DianpingUia2Session:
             root = ET.fromstring(source)
         except (ET.ParseError, TypeError):
             return None
-        return [
-            (by, value)
-            for by, value in candidates
-            if any(_node_matches_selector(n, by, value) for n in root.iter("node"))
-        ]
+        present = []
+        for by, value in candidates:
+            if not any(_node_matches_selector(n, by, value) for n in root.iter("node")):
+                continue
+            if _editor_chrome_only_match(root, by, value):
+                continue
+            present.append((by, value))
+        return present
 
     def _dismiss_dialogs(self, **kwargs: Any) -> ActionResult:
         if dish_edit_is_open(self._hierarchy_source()):
@@ -4162,6 +4269,8 @@ class DianpingUia2Session:
                 candidates.append(translated)
         dismissed = 0
         for _ in range(max_attempts):
+            # Re-dump every round: a successful tap changes the screen, so
+            # the next round must see the tree that is actually up now.
             present = self._present_candidates(candidates)
             if present is not None and not present:
                 # A healthy dump shows none of the candidates: tapping blind
@@ -4169,8 +4278,20 @@ class DianpingUia2Session:
                 # each, ~48s per launch with no dialog on screen -- live
                 # 2026-11-09). Nothing to dismiss this round.
                 break
+            if present is None:
+                # The dump channel is wedged: no tree to prove which node a
+                # selector would reach. The editor's own toolbar labels are
+                # the one known way to destroy a draft by accident, so they
+                # are excluded even on the blind path.
+                present = [
+                    (by, value)
+                    for by, value in candidates
+                    if not _editor_toolbar_label(by, value)
+                ]
+                if not present:
+                    break
             hit = False
-            for by, value in present if present is not None else candidates:
+            for by, value in present:
                 result = self._session.execute_action("tap", selector=value, by=by)
                 if result.success:
                     dismissed += 1
